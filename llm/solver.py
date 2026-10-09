@@ -6,10 +6,10 @@ import sys
 from openai import OpenAI
 from rule_check import parse_reply
 
-BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
-MODEL = os.environ.get("LLM_MODEL", "stub-model")
+BASE_URL = os.environ.get("FLEET_LLM_BASE_URL", "http://localhost:8000/v1")
+MODEL = os.environ.get("FLEET_LLM_MODEL", "stub-model")
 MAX_RETRIES = 2  # plus the first attempt = 3 tries total
-REQUEST_TIMEOUT_S = float(os.environ.get("LLM_REQUEST_TIMEOUT_S", "60"))
+REQUEST_TIMEOUT_S = float(os.environ.get("FLEET_LLM_TIMEOUT_S", "60"))
 
 SYSTEM_PROMPT = (
     "You output ONLY a single JSON object. No prose, no markdown fences. "

@@ -1,10 +1,12 @@
 """Stub OpenAI-compatible server for testing solver.py without a GPU.
 
 Env vars to force failure modes for testing:
+  FAKE_ALWAYS_GOOD=1    every reply is the good one (no retry needed)
   FAKE_ALWAYS_BAD=1     every reply is the bad (extra-field) one
   FAKE_HTTP_STATUS=500  respond with this HTTP status instead of 200
   FAKE_EMPTY_CONTENT=1  message.content is JSON null instead of real text
   FAKE_SLEEP_S=10       sleep this many seconds before replying
+Default (no env vars): request 1 is bad, request 2+ is good (tests retry).
 """
 import json
 import os
@@ -15,6 +17,7 @@ BAD_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_min_n":1
 GOOD_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_min_n":14,"carry_accel_max_ms2":2.5,"rationale":"slip before drop","source_report_ids":["fr_0001"]}'
 REPLIES = [BAD_REPLY, GOOD_REPLY]
 
+ALWAYS_GOOD = os.environ.get("FAKE_ALWAYS_GOOD") == "1"
 ALWAYS_BAD = os.environ.get("FAKE_ALWAYS_BAD") == "1"
 HTTP_STATUS = int(os.environ.get("FAKE_HTTP_STATUS", "200"))
 EMPTY_CONTENT = os.environ.get("FAKE_EMPTY_CONTENT") == "1"
@@ -44,6 +47,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if EMPTY_CONTENT:
             content = None
+        elif ALWAYS_GOOD:
+            content = GOOD_REPLY
         elif ALWAYS_BAD:
             content = BAD_REPLY
         else:
@@ -68,7 +73,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"fake_server modes: ALWAYS_BAD={ALWAYS_BAD} HTTP_STATUS={HTTP_STATUS} EMPTY_CONTENT={EMPTY_CONTENT} SLEEP_S={SLEEP_S}")
+    print(f"fake_server modes: ALWAYS_GOOD={ALWAYS_GOOD} ALWAYS_BAD={ALWAYS_BAD} HTTP_STATUS={HTTP_STATUS} EMPTY_CONTENT={EMPTY_CONTENT} SLEEP_S={SLEEP_S}")
     server = HTTPServer(("localhost", 8000), Handler)
     print("fake_server listening on http://localhost:8000/v1/chat/completions")
     server.serve_forever()
