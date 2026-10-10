@@ -1,0 +1,9 @@
+pyproject.toml
+./__init__.py
+./limits.py
+./schema.py
+rules.egg-info/PKG-INFO
+rules.egg-info/SOURCES.txt
+rules.egg-info/dependency_links.txt
+rules.egg-info/requires.txt
+rules.egg-info/top_level.txt

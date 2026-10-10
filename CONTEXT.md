@@ -184,3 +184,21 @@ fleet/
 - **Replay:** re-running trials with and without a candidate rule.
 - **vLLM / ROCm:** LLM serving software / AMD's GPU compute stack.
 - **MuJoCo:** physics simulator. **MJX:** its JAX-based GPU version (not used yet).
+
+---
+
+## 14. Part C — Rules engine (built)
+
+Lives in `fleet/rules/` (Python package `rules`), on git branch `rules`.
+Owns the official `Rule` schema and limits, `validate()`, `apply()` +
+multi-rule `CellState`, the rule lifecycle (event-sourced from a
+hash-chained audit log), the owner permission gate (`can_share()`), and a
+review CLI (`python -m rules.review_cli`). `fleet/llm/rule_check.py` is now
+a thin shim that delegates to it -- Part B's `solver.py`, `fake_server.py`,
+and `test_solver.py` are unchanged and still pass (`6/6`). See
+`fleet/rules/README.md` for setup/run instructions,
+`fleet/rules/DECISIONS.md` for every placeholder/flag and why, and
+`fleet/rules/INTEGRATION.md` for exactly what differs from Part B's original
+local copy.
+
+Run its tests: `cd fleet/rules && ../../.venv/Scripts/python.exe -m pytest -q`.

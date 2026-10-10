@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rules"
+version = "0.1.0"
+description = "FLEET Part C: rule schema, validation, apply, lifecycle, permission gate, audit log"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[tool.setuptools]
+# This pyproject.toml lives inside the "rules" package directory itself
+# (fleet/rules/__init__.py etc.), not in a parent project root, so map the
+# package name to "." rather than letting setuptools look for fleet/rules/rules/.
+package-dir = {"rules" = "."}
+packages = ["rules"]
