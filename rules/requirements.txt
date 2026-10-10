@@ -1,0 +1,4 @@
+# Runtime + test dependencies for fleet/rules (Part C). Does not touch
+# fleet/llm/requirements.txt.
+pydantic==2.14.0
+pytest==8.3.3
