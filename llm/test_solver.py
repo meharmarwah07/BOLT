@@ -1,14 +1,18 @@
 """Regression tests for solver.py against fake_server.py.
 
 Each case starts a fresh fake_server.py subprocess in a given failure mode,
-runs solver.py as a subprocess against it, and checks the result. Run with:
+runs solver.py as a subprocess against it, and checks the result, including
+the exact number of HTTP requests the server received (via the server's
+GET /__log__ endpoint). Run with:
     python test_solver.py
 """
+import json
 import os
 import socket
 import subprocess
 import sys
 import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = 8000
@@ -42,7 +46,12 @@ def wait_for_port_free(port, timeout=5):
     return False
 
 
-def run_case(name, start_server, server_env, solver_env, check):
+def fetch_log():
+    with urllib.request.urlopen(f"http://localhost:{PORT}/__log__", timeout=2) as resp:
+        return json.loads(resp.read())
+
+
+def run_case(name, start_server, server_env, solver_env, check, expected_requests=None, extra_check=None):
     server = None
     if start_server:
         env = {**os.environ, **server_env}
@@ -60,12 +69,26 @@ def run_case(name, start_server, server_env, solver_env, check):
             return False
 
     try:
-        env = {**os.environ, **solver_env}
+        env = {**os.environ, **solver_env, "FLEET_LLM_RETRY_SLEEP_S": "0"}
         result = subprocess.run(
             [sys.executable, "solver.py"], cwd=HERE, env=env,
             capture_output=True, text=True, timeout=30,
         )
         ok, reason = check(result)
+
+        log = None
+        if ok and start_server:
+            try:
+                log = fetch_log()
+            except Exception as e:
+                ok, reason = False, f"could not fetch request log: {e}"
+
+        if ok and start_server and expected_requests is not None and log["count"] != expected_requests:
+            ok, reason = False, f"expected {expected_requests} requests, server saw {log['count']}"
+
+        if ok and extra_check is not None:
+            ok, reason = extra_check(log)
+
         print(f"{'PASS' if ok else 'FAIL'} {name}" + ("" if ok else f" ({reason})"))
         if not ok:
             print(f"     stdout: {result.stdout.strip()!r}")
@@ -100,13 +123,50 @@ def rejected(expect_substring):
     return check
 
 
+def second_max_tokens_larger(log):
+    mt = log["max_tokens"]
+    if len(mt) < 2 or mt[0] is None or mt[1] is None or not (mt[1] > mt[0]):
+        return False, f"expected request 2's max_tokens > request 1's, got {mt}"
+    return True, ""
+
+
+def script_env(steps):
+    return {"FAKE_SCRIPT": json.dumps(steps)}
+
+
 CASES = [
-    ("good reply (no retry)", True, {"FAKE_ALWAYS_GOOD": "1"}, {}, accepted),
-    ("bad-then-good (one retry)", True, {}, {}, accepted),
-    ("all 3 attempts bad (exhausted retries)", True, {"FAKE_ALWAYS_BAD": "1"}, {}, rejected("Extra inputs are not permitted")),
-    ("server down (connection refused)", False, {}, {}, rejected("request failed")),
-    ("HTTP 500", True, {"FAKE_HTTP_STATUS": "500"}, {}, rejected("500")),
-    ("empty/missing content", True, {"FAKE_EMPTY_CONTENT": "1"}, {}, rejected("empty or missing message content")),
+    ("good reply (no retry)", True, {"FAKE_ALWAYS_GOOD": "1"}, {}, accepted, 1, None),
+    ("bad-then-good (one retry)", True, {}, {}, accepted, 2, None),
+    ("all 3 attempts bad (exhausted retries)", True, {"FAKE_ALWAYS_BAD": "1"}, {}, rejected("Extra inputs are not permitted"), 3, None),
+    ("server down (connection refused)", False, {}, {}, rejected("request failed"), None, None),
+    ("HTTP 500", True, {"FAKE_HTTP_STATUS": "500"}, {}, rejected("500"), 3, None),
+    ("empty/missing content", True, {"FAKE_EMPTY_CONTENT": "1"}, {}, rejected("empty or missing message content"), 3, None),
+
+    ("length-then-ok", True,
+     script_env([{"finish_reason": "length", "content": "truncated"}, {"finish_reason": "stop", "content": "good"}]),
+     {}, accepted, 2, second_max_tokens_larger),
+
+    ("length-twice", True,
+     script_env([{"finish_reason": "length", "content": "truncated"}]),
+     {}, rejected("finish_reason=length"), 2, None),
+
+    ("HTTP 400", True, script_env([{"status": 400}]), {}, rejected("HTTP 400"), 1, None),
+
+    ("HTTP 429-then-ok", True,
+     script_env([{"status": 429}, {"finish_reason": "stop", "content": "good"}]),
+     {}, accepted, 2, None),
+
+    ("missing choices then ok", True,
+     script_env([{"no_choices": True}, {"finish_reason": "stop", "content": "good"}]),
+     {}, accepted, 2, None),
+
+    ("unknown source id then ok", True,
+     script_env([{"finish_reason": "stop", "content": "unknown_source"}, {"finish_reason": "stop", "content": "good"}]),
+     {}, accepted, 2, None),
+
+    ("unknown source id three times", True,
+     script_env([{"finish_reason": "stop", "content": "unknown_source"}]),
+     {}, rejected("unknown source_report_ids"), 3, None),
 ]
 
 
