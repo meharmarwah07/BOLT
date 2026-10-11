@@ -31,12 +31,42 @@ import os
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-BAD_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_min_n":14,"carry_accel_max_ms2":2.5,"rationale":"slip before drop","source_report_ids":["fr_0001"],"confidence":0.9}'
-GOOD_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_min_n":14,"carry_accel_max_ms2":2.5,"rationale":"slip before drop","source_report_ids":["fr_0001"]}'
 TRUNCATED_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_mi'
 UNKNOWN_SOURCE_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_min_n":14,"carry_accel_max_ms2":2.5,"rationale":"slip before drop","source_report_ids":["fr_9999"]}'
-REPLIES = [BAD_REPLY, GOOD_REPLY]
-CONTENT_BY_NAME = {"good": GOOD_REPLY, "bad": BAD_REPLY, "truncated": TRUNCATED_REPLY, "unknown_source": UNKNOWN_SOURCE_REPLY}
+
+
+def _good_reply(source_ids):
+    return json.dumps({
+        "rule_id": "r_0001", "object_class": "glass_jar", "grip_force_min_n": 14,
+        "carry_accel_max_ms2": 2.5, "rationale": "slip before drop", "source_report_ids": source_ids,
+    })
+
+
+def _bad_reply(source_ids):
+    return json.dumps({
+        "rule_id": "r_0001", "object_class": "glass_jar", "grip_force_min_n": 14,
+        "carry_accel_max_ms2": 2.5, "rationale": "slip before drop", "source_report_ids": source_ids,
+        "confidence": 0.9,
+    })
+
+
+def _extract_report_ids(req_body):
+    """Pull report_id values out of the most recent user message, so the
+    stub's "good"/"bad" replies echo back a source_report_ids the caller
+    will actually recognize (real callers don't all use "fr_0001")."""
+    for msg in reversed(req_body.get("messages") or []):
+        if msg.get("role") != "user":
+            continue
+        try:
+            payload = json.loads(msg.get("content", ""))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(payload, list):
+            ids = [item["report_id"] for item in payload if isinstance(item, dict) and "report_id" in item]
+            return ids or None
+        return None
+    return None
+
 
 ALWAYS_GOOD = os.environ.get("FAKE_ALWAYS_GOOD") == "1"
 ALWAYS_BAD = os.environ.get("FAKE_ALWAYS_BAD") == "1"
@@ -61,13 +91,14 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             req_body = {}
         request_log.append({"max_tokens": req_body.get("max_tokens"), "messages": req_body.get("messages")})
+        source_ids = _extract_report_ids(req_body) or ["fr_0001"]
 
         if SLEEP_S > 0:
             time.sleep(SLEEP_S)
 
         if SCRIPT is not None:
             step = SCRIPT[min(request_count - 1, len(SCRIPT) - 1)]
-            self._respond_scripted(step)
+            self._respond_scripted(step, source_ids)
             return
 
         if HTTP_STATUS != 200:
@@ -77,11 +108,11 @@ class Handler(BaseHTTPRequestHandler):
         if EMPTY_CONTENT:
             content = None
         elif ALWAYS_GOOD:
-            content = GOOD_REPLY
+            content = _good_reply(source_ids)
         elif ALWAYS_BAD:
-            content = BAD_REPLY
+            content = _bad_reply(source_ids)
         else:
-            content = REPLIES[min(request_count - 1, len(REPLIES) - 1)]
+            content = _bad_reply(source_ids) if request_count == 1 else _good_reply(source_ids)
 
         self._send_json(200, self._completion_body(content, "stop"))
 
@@ -96,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _respond_scripted(self, step):
+    def _respond_scripted(self, step, source_ids):
         status = step.get("status", 200)
         if status != 200:
             self._send_json(status, {"error": "simulated server error"})
@@ -104,7 +135,17 @@ class Handler(BaseHTTPRequestHandler):
         if step.get("no_choices"):
             self._send_json(200, {"id": "chatcmpl-fake", "object": "chat.completion", "choices": []})
             return
-        content = CONTENT_BY_NAME[step.get("content", "good")]
+        name = step.get("content", "good")
+        if name == "good":
+            content = _good_reply(source_ids)
+        elif name == "bad":
+            content = _bad_reply(source_ids)
+        elif name == "truncated":
+            content = TRUNCATED_REPLY
+        elif name == "unknown_source":
+            content = UNKNOWN_SOURCE_REPLY
+        else:
+            raise ValueError(f"unknown FAKE_SCRIPT content name: {name!r}")
         finish_reason = step.get("finish_reason", "stop")
         self._send_json(200, self._completion_body(content, finish_reason))
 

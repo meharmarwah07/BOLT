@@ -51,6 +51,21 @@ fails with `ModuleNotFoundError: No module named 'rules'`.
 - `test_solver.py` — regression suite; spawns `fake_server.py` in each
   failure mode as a subprocess, runs `solver.py` against it, checks the
   result. Run with one command (below).
+- `fixtures/synthetic_reports.json` — 18 hand-made FailureReports (6 each
+  for `steel`, `cardboard`, `glass_jar`), used by `smoke_real.py`. Synthetic,
+  not simulator output; distinct from the few-shot examples in `prompts/`.
+- `fixtures/truth.json` — hidden ground truth for the fixtures above (a
+  `hidden_mu` per report plus a derived `feasible` / `min_grip_at_accel_floor`
+  verdict). **Never sent to the model.** `smoke_real.py` reads it only after
+  the fact, to score a reply.
+- `smoke_real.py` — calls `solver.solve()` once per fixture report (see
+  below) and scores the result against `fixtures/truth.json`. Prints a
+  per-class and overall table with Wilson confidence intervals, and writes
+  every per-call result to `runs/<timestamp>.json`.
+- `stats.py` — `wilson(k, n, z=1.96) -> (low, high)`, a from-scratch Wilson
+  score interval, used by `smoke_real.py` and nothing else yet.
+- `test_smoke.py` / `test_stats.py` — regression suites for the two files
+  above, same PASS/FAIL style as `test_solver.py`.
 
 ## Running the stub + solver by hand
 
@@ -73,6 +88,63 @@ python test_solver.py
 
 Starts and tears down its own `fake_server.py` subprocess per case; port 8000
 must be free before you run it.
+
+```bash
+cd ~/fleet/llm && source ~/fleet/.venv/bin/activate
+python test_smoke.py
+python test_stats.py
+```
+
+## Running the smoke script (`smoke_real.py`)
+
+Against the local stub — a plumbing check only, costs nothing, proves
+`solve()` runs end to end and `runs/` gets written:
+
+```bash
+cd ~/fleet/llm && source ~/fleet/.venv/bin/activate
+python fake_server.py          # terminal 1, leave running
+```
+
+```bash
+cd ~/fleet/llm && source ~/fleet/.venv/bin/activate
+python smoke_real.py --repeats 1   # terminal 2
+```
+
+Against a real model — this costs GPU time, so only run it after a clean
+stub run above. Point it at the real server with the same env vars
+`solver.py` reads, then run the same script unchanged:
+
+```bash
+cd ~/fleet/llm && source ~/fleet/.venv/bin/activate
+FLEET_LLM_BASE_URL=http://<host>:<port>/v1 FLEET_LLM_MODEL=<model-name> \
+    python smoke_real.py --repeats 3
+```
+
+`--repeats N` calls `solve()` N times per fixture report (default 1), useful
+against a real, non-deterministic model; it's a no-op against the stub,
+which always answers the same way.
+
+**What the numbers mean.** `smoke_real.py` prints, per object class and
+overall:
+- **valid-JSON rate** — fraction of calls that didn't end in `error` (i.e.
+  `solve()` returned *something* parseable, a `Rule` or a `no_safe_rule`).
+- **effective-rule rate among feasible cases** — of the fixture reports
+  where a safe rule actually exists (`truth.json`'s `feasible: true`), the
+  fraction where `solve()` both returned a `Rule` and that `Rule`'s numbers
+  would prevent the drop under the fixture's **hidden** `mu`.
+- **correct-refusal rate among infeasible cases** — of the reports where no
+  safe rule exists, the fraction where `solve()` correctly said `no_safe_rule`.
+- **wrong-refusal rate among feasible cases** — of the reports where a safe
+  rule *does* exist, the fraction where `solve()` wrongly gave up anyway.
+
+Each rate comes with a 95% Wilson interval from `stats.py`.
+
+**These are all an ANALYTIC stand-in, not a simulator measurement.**
+"Effective" and "feasible" come from the formula `N >= m*(g+a)/(2*mu)`
+against a hand-picked hidden `mu` in `fixtures/truth.json`, not from a
+MuJoCo replay. Treat every number here as "does the model's answer agree
+with the formula", not as a measured drop rate — the real measurement is
+Part A's held-out-seed replay (CONTEXT.md section 8).
 
 ## Env vars
 

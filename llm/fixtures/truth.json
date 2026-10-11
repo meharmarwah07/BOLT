@@ -1,0 +1,26 @@
+{
+  "note": "HIDDEN truth, synthetic/hand-made. NEVER send this file's contents to the LLM -- it exists only to score solver.py output analytically (llm/smoke_real.py), not as simulator ground truth.",
+  "formula": "N >= m * (g + a) / (2 * mu); g = 9.81; feasible if some grip_force_min_n <= min(40.0, crush_limit[object_class]) satisfies this at some carry_accel_max_ms2 in [0.5, 6.0] -- the easiest case is always a = 0.5 (the accel floor), so feasible iff min_grip_at_accel_floor <= min(40.0, crush_limit[object_class])",
+  "cases": {
+    "syn_steel_001":     {"hidden_mu": 0.60, "feasible": true,  "min_grip_at_accel_floor": 8.592},
+    "syn_steel_002":     {"hidden_mu": 0.50, "feasible": true,  "min_grip_at_accel_floor": 20.620},
+    "syn_steel_003":     {"hidden_mu": 0.55, "feasible": true,  "min_grip_at_accel_floor": 32.805},
+    "syn_steel_004":     {"hidden_mu": 0.45, "feasible": true,  "min_grip_at_accel_floor": 17.183},
+    "syn_steel_005":     {"hidden_mu": 0.42, "feasible": true,  "min_grip_at_accel_floor": 30.685},
+    "syn_steel_006":     {"hidden_mu": 0.30, "feasible": false, "min_grip_at_accel_floor": 103.100},
+
+    "syn_cardboard_001": {"hidden_mu": 0.40, "feasible": true,  "min_grip_at_accel_floor": 3.866},
+    "syn_cardboard_002": {"hidden_mu": 0.45, "feasible": true,  "min_grip_at_accel_floor": 5.728},
+    "syn_cardboard_003": {"hidden_mu": 0.40, "feasible": true,  "min_grip_at_accel_floor": 10.310},
+    "syn_cardboard_004": {"hidden_mu": 0.35, "feasible": true,  "min_grip_at_accel_floor": 8.837},
+    "syn_cardboard_005": {"hidden_mu": 0.30, "feasible": false, "min_grip_at_accel_floor": 20.620},
+    "syn_cardboard_006": {"hidden_mu": 0.25, "feasible": false, "min_grip_at_accel_floor": 18.558},
+
+    "syn_glass_001":     {"hidden_mu": 0.13, "feasible": true,  "min_grip_at_accel_floor": 23.792},
+    "syn_glass_002":     {"hidden_mu": 0.14, "feasible": true,  "min_grip_at_accel_floor": 18.411},
+    "syn_glass_003":     {"hidden_mu": 0.20, "feasible": true,  "min_grip_at_accel_floor": 5.155},
+    "syn_glass_004":     {"hidden_mu": 0.10, "feasible": false, "min_grip_at_accel_floor": 51.550},
+    "syn_glass_005":     {"hidden_mu": 0.08, "feasible": false, "min_grip_at_accel_floor": 32.219},
+    "syn_glass_006":     {"hidden_mu": 0.15, "feasible": false, "min_grip_at_accel_floor": 51.550}
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "note": "synthetic, hand-made, not simulator output",
+  "reports": [
+    {
+      "report_id": "syn_steel_001", "cell_id": "A", "owner_id": "owner1",
+      "object_class": "steel",
+      "controller": {"grip_force_n": 5.0, "carry_accel_ms2": 2.0},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 4.0, "est_mass_kg": 1.0, "seed": 9000
+    },
+    {
+      "report_id": "syn_steel_002", "cell_id": "B", "owner_id": "owner1",
+      "object_class": "steel",
+      "controller": {"grip_force_n": 12.0, "carry_accel_ms2": 3.0},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 7.0, "est_mass_kg": 2.0, "seed": 9001
+    },
+    {
+      "report_id": "syn_steel_003", "cell_id": "C", "owner_id": "owner2",
+      "object_class": "steel",
+      "controller": {"grip_force_n": 20.0, "carry_accel_ms2": 1.5},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 10.0, "est_mass_kg": 3.5, "seed": 9002
+    },
+    {
+      "report_id": "syn_steel_004", "cell_id": "A", "owner_id": "owner1",
+      "object_class": "steel",
+      "controller": {"grip_force_n": 9.0, "carry_accel_ms2": 4.0},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 5.5, "est_mass_kg": 1.5, "seed": 9003
+    },
+    {
+      "report_id": "syn_steel_005", "cell_id": "B", "owner_id": "owner1",
+      "object_class": "steel",
+      "controller": {"grip_force_n": 15.0, "carry_accel_ms2": 2.5},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 9.0, "est_mass_kg": 2.5, "seed": 9004
+    },
+    {
+      "report_id": "syn_steel_006", "cell_id": "C", "owner_id": "owner2",
+      "object_class": "steel",
+      "controller": {"grip_force_n": 25.0, "carry_accel_ms2": 3.5},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 40.0, "est_mass_kg": 6.0, "seed": 9005
+    },
+    {
+      "report_id": "syn_cardboard_001", "cell_id": "A", "owner_id": "owner1",
+      "object_class": "cardboard",
+      "controller": {"grip_force_n": 2.0, "carry_accel_ms2": 1.0},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 6.0, "est_mass_kg": 0.3, "seed": 9006
+    },
+    {
+      "report_id": "syn_cardboard_002", "cell_id": "B", "owner_id": "owner1",
+      "object_class": "cardboard",
+      "controller": {"grip_force_n": 3.0, "carry_accel_ms2": 1.5},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 7.5, "est_mass_kg": 0.5, "seed": 9007
+    },
+    {
+      "report_id": "syn_cardboard_003", "cell_id": "C", "owner_id": "owner2",
+      "object_class": "cardboard",
+      "controller": {"grip_force_n": 5.0, "carry_accel_ms2": 0.8},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 9.0, "est_mass_kg": 0.8, "seed": 9008
+    },
+    {
+      "report_id": "syn_cardboard_004", "cell_id": "A", "owner_id": "owner1",
+      "object_class": "cardboard",
+      "controller": {"grip_force_n": 4.0, "carry_accel_ms2": 1.2},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 8.0, "est_mass_kg": 0.6, "seed": 9009
+    },
+    {
+      "report_id": "syn_cardboard_005", "cell_id": "B", "owner_id": "owner1",
+      "object_class": "cardboard",
+      "controller": {"grip_force_n": 8.0, "carry_accel_ms2": 2.0},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 18.0, "est_mass_kg": 1.2, "seed": 9010
+    },
+    {
+      "report_id": "syn_cardboard_006", "cell_id": "C", "owner_id": "owner2",
+      "object_class": "cardboard",
+      "controller": {"grip_force_n": 6.0, "carry_accel_ms2": 1.5},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 16.0, "est_mass_kg": 0.9, "seed": 9011
+    },
+    {
+      "report_id": "syn_glass_001", "cell_id": "A", "owner_id": "owner1",
+      "object_class": "glass_jar",
+      "controller": {"grip_force_n": 15.0, "carry_accel_ms2": 5.0},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 20.0, "est_mass_kg": 0.6, "seed": 9012
+    },
+    {
+      "report_id": "syn_glass_002", "cell_id": "B", "owner_id": "owner1",
+      "object_class": "glass_jar",
+      "controller": {"grip_force_n": 12.0, "carry_accel_ms2": 4.5},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 15.0, "est_mass_kg": 0.5, "seed": 9013
+    },
+    {
+      "report_id": "syn_glass_003", "cell_id": "C", "owner_id": "owner2",
+      "object_class": "glass_jar",
+      "controller": {"grip_force_n": 3.0, "carry_accel_ms2": 2.0},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 8.0, "est_mass_kg": 0.2, "seed": 9014
+    },
+    {
+      "report_id": "syn_glass_004", "cell_id": "A", "owner_id": "owner1",
+      "object_class": "glass_jar",
+      "controller": {"grip_force_n": 20.0, "carry_accel_ms2": 3.0},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 30.0, "est_mass_kg": 1.0, "seed": 9015
+    },
+    {
+      "report_id": "syn_glass_005", "cell_id": "B", "owner_id": "owner1",
+      "object_class": "glass_jar",
+      "controller": {"grip_force_n": 10.0, "carry_accel_ms2": 2.0},
+      "outcome": "drop", "drop_phase": "carry",
+      "slip_mm_before_drop": 25.0, "est_mass_kg": 0.5, "seed": 9016
+    },
+    {
+      "report_id": "syn_glass_006", "cell_id": "C", "owner_id": "owner2",
+      "object_class": "glass_jar",
+      "controller": {"grip_force_n": 18.0, "carry_accel_ms2": 1.0},
+      "outcome": "drop", "drop_phase": "lift",
+      "slip_mm_before_drop": 28.0, "est_mass_kg": 1.5, "seed": 9017
+    }
+  ]
+}
