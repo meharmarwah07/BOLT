@@ -12,6 +12,14 @@ from openai import (
     RateLimitError,
 )
 from rule_check import Rule, parse_reply
+from rules.limits import (
+    CARRY_ACCEL_MAX_MS2,
+    CARRY_ACCEL_MIN_MS2,
+    CRUSH_LIMIT_N,
+    GRIP_FORCE_MAX_N,
+    GRIP_FORCE_MIN_N,
+    OBJECT_CLASSES,
+)
 
 BASE_URL = os.environ.get("FLEET_LLM_BASE_URL", "http://localhost:8000/v1")
 MODEL = os.environ.get("FLEET_LLM_MODEL", "stub-model")
@@ -21,12 +29,40 @@ MAX_TOKENS = int(os.environ.get("FLEET_LLM_MAX_TOKENS", "512"))
 MAX_TOKENS_CEILING = 2048
 RETRY_SLEEP_S = float(os.environ.get("FLEET_LLM_RETRY_SLEEP_S", "1"))
 
-SYSTEM_PROMPT = (
-    "You output ONLY a single JSON object. No prose, no markdown fences. "
-    "Given failure reports, propose a Rule with fields: rule_id, object_class, "
-    "grip_force_min_n, carry_accel_max_ms2, rationale, source_report_ids. "
-    "If no safe rule exists, output {\"no_safe_rule\": true, \"reason\": \"...\"} instead."
-)
+PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+_SYSTEM_PROMPT_PATH = os.path.join(PROMPTS_DIR, "solver_system.txt")
+_EXAMPLES_PATH = os.path.join(PROMPTS_DIR, "examples.json")
+
+
+def _load_system_prompt():
+    try:
+        with open(_SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
+            template = f.read()
+    except OSError as e:
+        raise RuntimeError(f"missing system prompt file: {_SYSTEM_PROMPT_PATH}") from e
+
+    crush_limits = "\n".join(f"  {cls}: {limit} N" for cls, limit in CRUSH_LIMIT_N.items())
+    return template.format(
+        object_classes=", ".join(OBJECT_CLASSES),
+        grip_min=GRIP_FORCE_MIN_N,
+        grip_max=GRIP_FORCE_MAX_N,
+        accel_min=CARRY_ACCEL_MIN_MS2,
+        accel_max=CARRY_ACCEL_MAX_MS2,
+        crush_limits=crush_limits,
+    )
+
+
+def _load_examples():
+    try:
+        with open(_EXAMPLES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as e:
+        raise RuntimeError(f"missing examples file: {_EXAMPLES_PATH}") from e
+    return data["examples"]
+
+
+SYSTEM_PROMPT = _load_system_prompt()
+EXAMPLES = _load_examples()
 
 
 class _TransientRequestError(Exception):
@@ -51,10 +87,11 @@ def solve(failure_reports):
 
     valid_report_ids = {r["report_id"] for r in failure_reports if "report_id" in r}
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(failure_reports)},
-    ]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for example in EXAMPLES:
+        messages.append({"role": "user", "content": json.dumps(example["failure_reports"])})
+        messages.append({"role": "assistant", "content": json.dumps(example["response"])})
+    messages.append({"role": "user", "content": json.dumps(failure_reports)})
 
     max_tokens = MAX_TOKENS
     length_retry_used = False

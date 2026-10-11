@@ -20,10 +20,11 @@ FAKE_SCRIPT step dict keys (all optional):
 Default (no env vars): request 1 is bad, request 2+ is good (tests retry).
 
 Every request (successful or not) is recorded; GET /__log__ returns
-{"count": N, "max_tokens": [max_tokens sent on each request, in order]}
-so tests can assert exactly how many requests were made and with what
-max_tokens, without the test process needing to share memory with this
-subprocess.
+{"count": N, "max_tokens": [...], "messages": [...]}  -- the max_tokens and
+full "messages" list sent on each request, in order -- so tests can assert
+exactly how many requests were made, with what max_tokens, and with what
+message content, without the test process needing to share memory with
+this subprocess.
 """
 import json
 import os
@@ -59,7 +60,7 @@ class Handler(BaseHTTPRequestHandler):
             req_body = json.loads(body_bytes) if body_bytes else {}
         except json.JSONDecodeError:
             req_body = {}
-        request_log.append({"max_tokens": req_body.get("max_tokens")})
+        request_log.append({"max_tokens": req_body.get("max_tokens"), "messages": req_body.get("messages")})
 
         if SLEEP_S > 0:
             time.sleep(SLEEP_S)
@@ -86,7 +87,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/__log__":
-            self._send_json(200, {"count": request_count, "max_tokens": [r["max_tokens"] for r in request_log]})
+            self._send_json(200, {
+                "count": request_count,
+                "max_tokens": [r["max_tokens"] for r in request_log],
+                "messages": [r["messages"] for r in request_log],
+            })
             return
         self.send_response(404)
         self.end_headers()

@@ -1,0 +1,28 @@
+You output ONLY a single JSON object: no prose, no markdown code fences, no text before or after the JSON.
+
+Given one or more FailureReport objects, propose a candidate Rule, or state that no safe rule exists.
+
+A Rule must contain exactly these fields:
+  rule_id              string, a short unique id for this proposal
+  object_class         one of: {object_classes}
+  grip_force_min_n     number, minimum safe grip force in Newtons
+  carry_accel_max_ms2  number, maximum safe carry acceleration in m/s^2
+  rationale            string, at most 300 characters, your reasoning
+  source_report_ids    list of report_id values copied EXACTLY from the input reports you used as evidence
+
+Hard limits (gripper datasheet limits; a value outside these ranges is invalid regardless of object class):
+  grip_force_min_n must be between {grip_min} and {grip_max} N
+  carry_accel_max_ms2 must be between {accel_min} and {accel_max} m/s^2
+
+Per-object-class crush limits (grip_force_min_n must not exceed this value for the report's object_class; exceeding it crushes the object and is invalid even if within the hard limits above):
+{crush_limits}
+
+You have two levers: raise grip force (limited by the object's crush limit) or lower carry acceleration (limited by its minimum). Lowering acceleration reduces the grip force needed.
+
+Prefer proposing a Rule when one is feasible. Use no_safe_rule only when the limits make every fix impossible, or the evidence shows the drop was not caused by grip force or acceleration. When you do, output exactly:
+  {{"no_safe_rule": true, "reason": "..."}}
+instead of a Rule. Every Rule you propose must satisfy every limit above.
+
+The true friction coefficient between the gripper pad and the object is hidden and never given to you. Reason only from the evidence you do have: slip_mm_before_drop, est_mass_kg, grip_force_n, and carry_accel_ms2 in the failure reports.
+
+Every id in source_report_ids must be copied verbatim from the report_id field of one of the input FailureReport objects. Never invent an id that was not in the input.

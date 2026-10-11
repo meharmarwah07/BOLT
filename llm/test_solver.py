@@ -134,6 +134,31 @@ def script_env(steps):
     return {"FAKE_SCRIPT": json.dumps(steps)}
 
 
+def prompt_and_examples_reach_server(log):
+    import solver as solver_mod
+
+    requests = log["messages"]
+    if not requests or not requests[0]:
+        return False, "no messages recorded on first request"
+    msgs = requests[0]
+    if not msgs or msgs[0].get("role") != "system":
+        return False, "first message sent to the server is not role=system"
+    if "no_safe_rule" not in msgs[0].get("content", ""):
+        return False, "system message sent to the server does not mention no_safe_rule"
+
+    expected_len = 1 + 2 * len(solver_mod.EXAMPLES) + 1
+    if len(msgs) != expected_len:
+        return False, f"expected {expected_len} messages (system + {len(solver_mod.EXAMPLES)} examples + real request), got {len(msgs)}"
+
+    for i, ex in enumerate(solver_mod.EXAMPLES):
+        user_msg, assistant_msg = msgs[1 + 2 * i], msgs[2 + 2 * i]
+        if user_msg.get("role") != "user" or json.loads(user_msg["content"]) != ex["failure_reports"]:
+            return False, f"example {i} user message does not match prompts/examples.json"
+        if assistant_msg.get("role") != "assistant" or json.loads(assistant_msg["content"]) != ex["response"]:
+            return False, f"example {i} assistant message does not match prompts/examples.json"
+    return True, ""
+
+
 CASES = [
     ("good reply (no retry)", True, {"FAKE_ALWAYS_GOOD": "1"}, {}, accepted, 1, None),
     ("bad-then-good (one retry)", True, {}, {}, accepted, 2, None),
@@ -167,6 +192,85 @@ CASES = [
     ("unknown source id three times", True,
      script_env([{"finish_reason": "stop", "content": "unknown_source"}]),
      {}, rejected("unknown source_report_ids"), 3, None),
+
+    ("prompt includes system message and examples", True, {"FAKE_ALWAYS_GOOD": "1"}, {}, accepted, 1, prompt_and_examples_reach_server),
+]
+
+
+def run_unit(name, fn):
+    try:
+        ok, reason = fn()
+    except Exception as e:
+        ok, reason = False, f"unexpected {type(e).__name__}: {e}"
+    print(f"{'PASS' if ok else 'FAIL'} {name}" + ("" if ok else f" ({reason})"))
+    return ok
+
+
+def test_examples_pass_real_validator():
+    import solver as solver_mod
+    from rule_check import Rule, parse_reply
+
+    for example in solver_mod.EXAMPLES:
+        response = example["response"]
+        if "no_safe_rule" in response:
+            continue
+        obj, err = parse_reply(json.dumps(response))
+        if obj is None or not isinstance(obj, Rule):
+            return False, f"example {response.get('rule_id')!r} failed rule_check.parse_reply: {err}"
+    return True, ""
+
+
+def test_system_prompt_nonempty_and_mentions_no_safe_rule():
+    import solver as solver_mod
+
+    if not solver_mod.SYSTEM_PROMPT.strip():
+        return False, "system prompt file is empty"
+    if "no_safe_rule" not in solver_mod.SYSTEM_PROMPT:
+        return False, "system prompt does not mention no_safe_rule"
+    return True, ""
+
+
+def test_system_prompt_limits_match_rules_limits():
+    import solver as solver_mod
+    from rules.limits import (
+        CARRY_ACCEL_MAX_MS2,
+        CARRY_ACCEL_MIN_MS2,
+        CRUSH_LIMIT_N,
+        GRIP_FORCE_MAX_N,
+        GRIP_FORCE_MIN_N,
+    )
+
+    text = solver_mod.SYSTEM_PROMPT
+    for value in (GRIP_FORCE_MIN_N, GRIP_FORCE_MAX_N, CARRY_ACCEL_MIN_MS2, CARRY_ACCEL_MAX_MS2):
+        if str(value) not in text:
+            return False, f"limit {value} from rules.limits not found in the loaded prompt text"
+    for object_class, limit in CRUSH_LIMIT_N.items():
+        if object_class not in text or str(limit) not in text:
+            return False, f"crush limit for {object_class!r} ({limit}) not found in the loaded prompt text"
+    return True, ""
+
+
+def test_examples_exclude_glass_jar():
+    import solver as solver_mod
+
+    # glass_jar is the real demo's hidden-friction failure class (CONTEXT.md).
+    # A few-shot example using it risks anchoring the model on that exact
+    # answer instead of reasoning from the evidence it's actually given, so
+    # no example (report or response) may use object_class "glass_jar".
+    for example in solver_mod.EXAMPLES:
+        for report in example["failure_reports"]:
+            if report.get("object_class") == "glass_jar":
+                return False, f"example report {report.get('report_id')!r} uses object_class=glass_jar"
+        if example["response"].get("object_class") == "glass_jar":
+            return False, "example response uses object_class=glass_jar"
+    return True, ""
+
+
+UNIT_TESTS = [
+    ("examples.json Rules pass rule_check.parse_reply", test_examples_pass_real_validator),
+    ("system prompt non-empty and mentions no_safe_rule", test_system_prompt_nonempty_and_mentions_no_safe_rule),
+    ("system prompt limits match rules/limits.py", test_system_prompt_limits_match_rules_limits),
+    ("no example uses object_class=glass_jar (anchoring risk)", test_examples_exclude_glass_jar),
 ]
 
 
@@ -176,6 +280,7 @@ if __name__ == "__main__":
         sys.exit(2)
 
     results = [run_case(*case) for case in CASES]
+    results += [run_unit(name, fn) for name, fn in UNIT_TESTS]
     passed = sum(results)
     print(f"\n{passed}/{len(results)} passed")
     sys.exit(0 if all(results) else 1)

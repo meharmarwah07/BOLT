@@ -19,6 +19,22 @@ fails with `ModuleNotFoundError: No module named 'rules'`.
 
 ## Files
 
+- `prompts/solver_system.txt` — the system prompt template, loaded by
+  `solver.py` at import time (path resolved relative to `solver.py`, not the
+  working directory). Its hard-limit and crush-limit numbers are
+  placeholders like `{grip_min}` / `{crush_limits}`, filled in from
+  `rules/limits.py` so the numbers in the prompt can never drift from the
+  numbers the real validator enforces. Edit the wording freely; edit the
+  placeholder names only if you also update `_load_system_prompt()` in
+  `solver.py` to pass a matching keyword.
+- `prompts/examples.json` — 3 synthetic few-shot examples (two valid Rules,
+  one `no_safe_rule`), sent to the model as user/assistant message pairs
+  before the real request. Each Rule example is checked by the test suite
+  against the real validator (`rule_check.parse_reply`), so if you edit an
+  example's numbers, make sure it still respects `rules/limits.py`'s ranges
+  and crush limits. The object classes and numbers here are deliberately
+  different from the `glass_jar` case in `CONTEXT.md`, so the examples
+  teach the output format without anchoring the model on that answer.
 - `rule_check.py` — `Rule` / `NoSafeRule` pydantic models and `parse_reply()`,
   the local v0 copy of Part C's contract (placeholder limits).
 - `try_replies.py` — runs `parse_reply()` against 6 hand-written fake LLM
@@ -96,9 +112,10 @@ must be free before you run it.
 | (none set) | request 1 is bad, request 2+ is good — tests retry-recovers |
 
 `fake_server.py` also exposes `GET /__log__`, returning
-`{"count": N, "max_tokens": [...]}` for the requests it has received so
-far, so tests can assert exactly how many requests were made and with
-what `max_tokens`.
+`{"count": N, "max_tokens": [...], "messages": [...]}` for the requests it
+has received so far, so tests can assert exactly how many requests were
+made, with what `max_tokens`, and with what message content (e.g. that the
+system prompt and few-shot examples actually reached the server).
 
 ## Known limits
 

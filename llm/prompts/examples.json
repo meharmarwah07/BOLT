@@ -1,0 +1,73 @@
+{
+  "note": "synthetic examples, not simulator output",
+  "examples": [
+    {
+      "failure_reports": [
+        {
+          "report_id": "ex_steel_001",
+          "cell_id": "B",
+          "owner_id": "owner1",
+          "object_class": "steel",
+          "controller": {"grip_force_n": 10.0, "carry_accel_ms2": 4.0},
+          "outcome": "drop",
+          "drop_phase": "carry",
+          "slip_mm_before_drop": 6.2,
+          "est_mass_kg": 2.0,
+          "seed": 501
+        }
+      ],
+      "response": {
+        "rule_id": "r_ex_steel_001",
+        "object_class": "steel",
+        "grip_force_min_n": 28.0,
+        "carry_accel_max_ms2": 2.5,
+        "rationale": "10 N grip at 4.0 m/s^2 caused 6.2 mm of slip for this 2.0 kg steel part. Lowering carry acceleration to 2.5 m/s^2 reduces the grip force needed to hold it; 28 N covers that with margin and stays under the 40 N steel crush limit.",
+        "source_report_ids": ["ex_steel_001"]
+      }
+    },
+    {
+      "failure_reports": [
+        {
+          "report_id": "ex_cardboard_001",
+          "cell_id": "B",
+          "owner_id": "owner1",
+          "object_class": "cardboard",
+          "controller": {"grip_force_n": 3.0, "carry_accel_ms2": 1.0},
+          "outcome": "drop",
+          "drop_phase": "lift",
+          "slip_mm_before_drop": 9.5,
+          "est_mass_kg": 0.4,
+          "seed": 777
+        }
+      ],
+      "response": {
+        "rule_id": "r_ex_cardboard_001",
+        "object_class": "cardboard",
+        "grip_force_min_n": 6.0,
+        "carry_accel_max_ms2": 1.0,
+        "rationale": "9.5 mm of slip during lift at 3.0 N grip for a 0.4 kg cardboard box shows the clamp force was too low; 6.0 N adds margin above the estimated slip threshold while staying well under the 12 N cardboard crush limit.",
+        "source_report_ids": ["ex_cardboard_001"]
+      }
+    },
+    {
+      "failure_reports": [
+        {
+          "report_id": "ex_cardboard_002",
+          "cell_id": "C",
+          "owner_id": "owner2",
+          "object_class": "cardboard",
+          "controller": {"grip_force_n": 11.5, "carry_accel_ms2": 1.0},
+          "outcome": "drop",
+          "drop_phase": "carry",
+          "slip_mm_before_drop": 22.0,
+          "est_mass_kg": 3.0,
+          "seed": 888
+        }
+      ],
+      "response": {
+        "no_safe_rule": true,
+        "reason": "Grip is already 11.5 N, just under the 12 N cardboard crush limit, so it cannot be raised. Lowering accel to the 0.5 m/s^2 minimum only cuts the needed grip force by about 5% ((9.81+0.5)/(9.81+1.0)) -- too little for 22.0 mm of slip. No safe rule exists."
+      }
+    }
+  ]
+}
