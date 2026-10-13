@@ -55,6 +55,15 @@ def get_metrics():
     }
 
 
+# Per-attempt bookkeeping for the most recent solve() call, read by smoke_real.py.
+# attempt_errors[i] is None if attempt i+1 succeeded, else its failure reason.
+_LAST_CALL = {"attempts": 0, "attempt_errors": []}
+
+
+def get_last_call_info():
+    return {"attempts": _LAST_CALL["attempts"], "attempt_errors": list(_LAST_CALL["attempt_errors"])}
+
+
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 _SYSTEM_PROMPT_PATH = os.path.join(PROMPTS_DIR, "solver_system.txt")
 _EXAMPLES_PATH = os.path.join(PROMPTS_DIR, "examples.json")
@@ -133,12 +142,16 @@ def _call(client, messages, max_tokens):
 
 
 def solve(failure_reports):
+    _LAST_CALL["attempts"] = 0
+    _LAST_CALL["attempt_errors"] = []
+
     try:
         client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=REQUEST_TIMEOUT_S, max_retries=0)
     except Exception as e:
         raise RuntimeError(f"failed to construct OpenAI client: {e}") from e
 
     valid_report_ids = {r["report_id"] for r in failure_reports if "report_id" in r}
+    expected_object_classes = {r["object_class"] for r in failure_reports if "object_class" in r}
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for example in EXAMPLES:
@@ -151,34 +164,42 @@ def solve(failure_reports):
     last_err = None
 
     for attempt in range(1 + MAX_RETRIES):
+        _LAST_CALL["attempts"] = attempt + 1
         try:
             response = _call(client, messages, max_tokens)
         except _RateLimitTransientError as e:
             last_err = f"request failed: {e}"
+            _LAST_CALL["attempt_errors"].append(last_err)
             if attempt < MAX_RETRIES:
                 sleep_s = e.retry_after_s + random.uniform(0, RETRY_AFTER_JITTER_MAX_S)
                 time.sleep(sleep_s)
             continue
         except _TransientRequestError as e:
             last_err = f"request failed: {e}"
+            _LAST_CALL["attempt_errors"].append(last_err)
             if attempt < MAX_RETRIES and RETRY_SLEEP_S > 0:
                 time.sleep(RETRY_SLEEP_S)
             continue
+        except RuntimeError as e:
+            _LAST_CALL["attempt_errors"].append(str(e))
+            raise
 
         if not response.choices or response.choices[0].message is None:
             last_err = "malformed response: no choices"
+            _LAST_CALL["attempt_errors"].append(last_err)
             continue
 
         choice = response.choices[0]
         _METRICS["finish_reasons"][choice.finish_reason] = _METRICS["finish_reasons"].get(choice.finish_reason, 0) + 1
         if choice.finish_reason == "length":
             if length_retry_used:
-                raise RuntimeError(
-                    f"solve() failed: finish_reason=length twice; max_tokens limit used={max_tokens}"
-                )
+                msg = f"finish_reason=length twice; max_tokens limit used={max_tokens}"
+                _LAST_CALL["attempt_errors"].append(msg)
+                raise RuntimeError(f"solve() failed: {msg}")
             length_retry_used = True
             max_tokens = min(max_tokens * 2, MAX_TOKENS_CEILING)
             last_err = f"finish_reason=length (truncated; retrying with max_tokens={max_tokens})"
+            _LAST_CALL["attempt_errors"].append(last_err)
             continue  # do not feed the truncated text back
 
         reply_text = choice.message.content or ""
@@ -195,11 +216,19 @@ def solve(failure_reports):
                     f"unknown source_report_ids: {unknown}; "
                     f"valid ids are: {sorted(valid_report_ids)}"
                 )
+            elif expected_object_classes and obj.object_class not in expected_object_classes:
+                err = (
+                    f"object_class mismatch: rule proposes {obj.object_class!r} but the "
+                    f"source report(s) are {sorted(expected_object_classes)}"
+                )
+                obj = None
 
         if obj is not None:
+            _LAST_CALL["attempt_errors"].append(None)
             return obj
 
         last_err = err
+        _LAST_CALL["attempt_errors"].append(err)
         messages.append({"role": "assistant", "content": reply_text})
         messages.append({"role": "user", "content": f"That reply was rejected: {err}. Reply again with ONLY the corrected JSON."})
 

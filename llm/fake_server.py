@@ -15,7 +15,8 @@ FAKE_SCRIPT step dict keys (all optional):
   status          HTTP status to send (default 200)
   retry_after     if status == 429, send this value as the Retry-After header
   finish_reason   "stop" or "length" (default "stop")
-  content         "good" | "bad" | "truncated" | "unknown_source" (default "good")
+  content         "good" | "bad" | "truncated" | "unknown_source" | "mismatched_class"
+                  (default "good")
   no_choices      true -> response body has "choices": [] (overrides content/finish_reason)
 
 Default (no env vars): request 1 is bad, request 2+ is good (tests retry).
@@ -70,6 +71,30 @@ def _extract_report_ids(req_body):
     return None
 
 
+def _extract_object_class(req_body):
+    """Pull the object_class of the first report in the most recent user
+    message, so "mismatched_class" can echo back something different."""
+    for msg in reversed(req_body.get("messages") or []):
+        if msg.get("role") != "user":
+            continue
+        try:
+            payload = json.loads(msg.get("content", ""))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return payload[0].get("object_class")
+        return None
+    return None
+
+
+def _mismatched_class_reply(source_ids, real_class):
+    wrong_class = "steel" if real_class != "steel" else "cardboard"
+    return json.dumps({
+        "rule_id": "r_0001", "object_class": wrong_class, "grip_force_min_n": 14,
+        "carry_accel_max_ms2": 2.5, "rationale": "slip before drop", "source_report_ids": source_ids,
+    })
+
+
 ALWAYS_GOOD = os.environ.get("FAKE_ALWAYS_GOOD") == "1"
 ALWAYS_BAD = os.environ.get("FAKE_ALWAYS_BAD") == "1"
 HTTP_STATUS = int(os.environ.get("FAKE_HTTP_STATUS", "200"))
@@ -98,13 +123,14 @@ class Handler(BaseHTTPRequestHandler):
             "reasoning_effort": req_body.get("reasoning_effort"),
         })
         source_ids = _extract_report_ids(req_body) or ["fr_0001"]
+        real_class = _extract_object_class(req_body) or "glass_jar"
 
         if SLEEP_S > 0:
             time.sleep(SLEEP_S)
 
         if SCRIPT is not None:
             step = SCRIPT[min(request_count - 1, len(SCRIPT) - 1)]
-            self._respond_scripted(step, source_ids)
+            self._respond_scripted(step, source_ids, real_class)
             return
 
         if HTTP_STATUS != 200:
@@ -135,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _respond_scripted(self, step, source_ids):
+    def _respond_scripted(self, step, source_ids, real_class):
         status = step.get("status", 200)
         if status != 200:
             headers = None
@@ -155,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
             content = TRUNCATED_REPLY
         elif name == "unknown_source":
             content = UNKNOWN_SOURCE_REPLY
+        elif name == "mismatched_class":
+            content = _mismatched_class_reply(source_ids, real_class)
         else:
             raise ValueError(f"unknown FAKE_SCRIPT content name: {name!r}")
         finish_reason = step.get("finish_reason", "stop")

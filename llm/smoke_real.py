@@ -104,7 +104,8 @@ def run_once(report, min_interval_s):
     except Exception as e:
         error_text = str(e)
     latency_s = time.perf_counter() - start
-    return rule_or_none, error_text, latency_s
+    call_info = solver.get_last_call_info()
+    return rule_or_none, error_text, latency_s, call_info["attempts"], call_info["attempt_errors"]
 
 
 def rate_with_ci(k, n):
@@ -121,11 +122,21 @@ def aggregate(records):
     effective_k = sum(1 for r in feasible if r["outcome"] == "valid_rule" and r["effective"])
     correct_refusal_k = sum(1 for r in infeasible if r["outcome"] == "no_safe_rule")
     wrong_refusal_k = sum(1 for r in feasible if r["outcome"] == "no_safe_rule")
+
+    # first_attempt_valid: did attempt 1 alone already produce a valid (non-error) reply?
+    first_attempt_valid_k = sum(1 for r in records if r["attempt_errors"] and r["attempt_errors"][0] is None)
+    # after_retries_valid: of the calls that needed to retry at all, how often did a later
+    # attempt rescue it into a valid (non-error) final outcome?
+    retried = [r for r in records if r["attempts_used"] > 1]
+    after_retries_valid_k = sum(1 for r in retried if r["outcome"] != "error")
+
     return {
         "valid_json_rate": rate_with_ci(valid_json_k, len(records)),
         "effective_rule_rate_among_feasible": rate_with_ci(effective_k, len(feasible)),
         "correct_refusal_rate_among_infeasible": rate_with_ci(correct_refusal_k, len(infeasible)),
         "wrong_refusal_rate_among_feasible": rate_with_ci(wrong_refusal_k, len(feasible)),
+        "first_attempt_valid_rate": rate_with_ci(first_attempt_valid_k, len(records)),
+        "after_retries_valid_rate": rate_with_ci(after_retries_valid_k, len(retried)),
     }
 
 
@@ -157,7 +168,7 @@ def main():
     for report in reports:
         truth_case = truth[report["report_id"]]
         for repeat_index in range(args.repeats):
-            rule_or_none, error_text, latency_s = run_once(report, args.min_interval_s)
+            rule_or_none, error_text, latency_s, attempts_used, attempt_errors = run_once(report, args.min_interval_s)
             verdict = score_call(report, truth_case, rule_or_none, error_text)
             if isinstance(rule_or_none, (Rule, NoSafeRule)):
                 rule_field = rule_or_none.model_dump(mode="json")
@@ -174,10 +185,13 @@ def main():
                 "latency_s": latency_s,
                 "rule": rule_field,
                 "error": error_text,
+                "attempts_used": attempts_used,
+                "attempt_errors": attempt_errors,
             }
             records.append(record)
             print(f"{record['report_id']:>20s} #{repeat_index}  {record['outcome']:12s}  "
-                  f"{latency_s:6.2f}s  effective={record['effective']}  refusal_correct={record['refusal_correct']}")
+                  f"{latency_s:6.2f}s  attempts={attempts_used}  effective={record['effective']}  "
+                  f"refusal_correct={record['refusal_correct']}")
 
     print()
     for object_class in sorted({r["object_class"] for r in records}):

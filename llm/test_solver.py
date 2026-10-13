@@ -134,6 +134,19 @@ def script_env(steps):
     return {"FAKE_SCRIPT": json.dumps(steps)}
 
 
+def mismatch_repair_message_sent(log):
+    if len(log["messages"]) < 2:
+        return False, "expected at least 2 requests"
+    second_request_msgs = log["messages"][1]
+    repair_msgs = [
+        m for m in second_request_msgs
+        if m.get("role") == "user" and "object_class mismatch" in m.get("content", "")
+    ]
+    if not repair_msgs:
+        return False, "expected a repair message mentioning 'object_class mismatch' in request 2"
+    return True, ""
+
+
 def prompt_and_examples_reach_server(log):
     import solver as solver_mod
 
@@ -192,6 +205,14 @@ CASES = [
     ("unknown source id three times", True,
      script_env([{"finish_reason": "stop", "content": "unknown_source"}]),
      {}, rejected("unknown source_report_ids"), 3, None),
+
+    ("mismatched object_class then ok", True,
+     script_env([{"content": "mismatched_class"}, {"finish_reason": "stop", "content": "good"}]),
+     {}, accepted, 2, mismatch_repair_message_sent),
+
+    ("mismatched object_class three times", True,
+     script_env([{"content": "mismatched_class"}]),
+     {}, rejected("object_class mismatch"), 3, None),
 
     ("prompt includes system message and examples", True, {"FAKE_ALWAYS_GOOD": "1"}, {}, accepted, 1, prompt_and_examples_reach_server),
 ]
