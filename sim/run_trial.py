@@ -20,7 +20,14 @@ from typing import Optional
 import mujoco
 import numpy as np
 
-from cell_model import OBJECT_CLASSES, build_xml, motion_profile
+from cell_model import (
+    OBJECT_CLASSES,
+    PLACEMENT_JITTER_M,
+    build_xml,
+    hold_steps_for,
+    motion_profile,
+    sample_friction,
+)
 
 # Fixed implementation details, NOT controller parameters. Only
 # grip_force_n and carry_accel_ms2 (in `params`) are real controller knobs
@@ -30,11 +37,6 @@ LIFT_ACCEL_MS2 = 1.0
 CARRY_DISTANCE_M = 0.2
 
 SLIP_DROP_THRESHOLD_MM = 20.0
-
-# Represents imprecise upstream part placement (a real feeder/conveyor
-# wouldn't place a part at an exact (0,0) every time). +/-5mm is a
-# simulation design choice, not a measured tolerance.
-PLACEMENT_JITTER_M = 0.005
 
 
 @dataclass
@@ -58,8 +60,9 @@ def run_trial(object_class, params, seed):
 
     rng = np.random.default_rng(seed)
     obj_x, obj_y = rng.uniform(-PLACEMENT_JITTER_M, PLACEMENT_JITTER_M, size=2)
+    friction = sample_friction(object_class, rng)
 
-    model = mujoco.MjModel.from_xml_string(build_xml(object_class, obj_x, obj_y))
+    model = mujoco.MjModel.from_xml_string(build_xml(object_class, obj_x, obj_y, friction))
     data = mujoco.MjData(model)
     dt = model.opt.timestep
 
@@ -116,7 +119,7 @@ def run_trial(object_class, params, seed):
         max_slip_mm = max(max_slip_mm, slip_mm_from(baseline_lift))
         if done:
             break
-    for _ in range(300):
+    for _ in range(hold_steps_for(LIFT_HEIGHT_M, LIFT_ACCEL_MS2, dt)):
         step(LIFT_HEIGHT_M)
         max_slip_mm = max(max_slip_mm, slip_mm_from(baseline_lift))
 
@@ -141,7 +144,7 @@ def run_trial(object_class, params, seed):
             max_slip_mm = max(max_slip_mm, slip_mm_from(baseline_carry))
             if done:
                 break
-        for _ in range(300):
+        for _ in range(hold_steps_for(CARRY_DISTANCE_M, carry_accel_ms2, dt)):
             step(LIFT_HEIGHT_M, CARRY_DISTANCE_M)
             max_slip_mm = max(max_slip_mm, slip_mm_from(baseline_carry))
 

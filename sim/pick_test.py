@@ -29,17 +29,34 @@ import time
 import glfw
 import mujoco
 import mujoco.viewer
+import numpy as np
 
-from cell_model import OBJECT_CLASSES, build_xml, motion_profile
+from cell_model import (
+    OBJECT_CLASSES,
+    PLACEMENT_JITTER_M,
+    build_xml,
+    hold_steps_for,
+    motion_profile,
+    sample_friction,
+)
 
 
 class _RestartRequested(Exception):
     """Raised by step() when the viewer's reset key was pressed mid-trial."""
 
 
-def run(object_class, grip_force_n, lift_height, lift_accel, carry_distance, carry_accel, use_viewer):
+def run(object_class, grip_force_n, lift_height, lift_accel, carry_distance, carry_accel, use_viewer, seed=None):
     obj_props = OBJECT_CLASSES[object_class]
-    model = mujoco.MjModel.from_xml_string(build_xml(object_class))
+    if seed is None:
+        # No seed given (plain interactive demo): no placement jitter, and
+        # friction uses the class's nominal (midpoint) value rather than a
+        # seeded sample -- pass --seed to preview a specific hidden-mu draw.
+        obj_x, obj_y, friction = 0.0, 0.0, None
+    else:
+        rng = np.random.default_rng(seed)
+        obj_x, obj_y = rng.uniform(-PLACEMENT_JITTER_M, PLACEMENT_JITTER_M, size=2)
+        friction = sample_friction(object_class, rng)
+    model = mujoco.MjModel.from_xml_string(build_xml(object_class, obj_x, obj_y, friction))
     data = mujoco.MjData(model)
 
     lift_act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "lift_motor")
@@ -147,7 +164,7 @@ def run(object_class, grip_force_n, lift_height, lift_accel, carry_distance, car
             max_slip_lift_mm = max(max_slip_lift_mm, slip_mm_from(baseline_lift))
             if done:
                 break
-        for _ in range(300):  # hold at top, see if it keeps slipping
+        for _ in range(hold_steps_for(lift_height, lift_accel, dt)):  # hold at top, see if it keeps slipping
             step(lift_height)
             max_slip_lift_mm = max(max_slip_lift_mm, slip_mm_from(baseline_lift))
 
@@ -174,7 +191,7 @@ def run(object_class, grip_force_n, lift_height, lift_accel, carry_distance, car
                 max_slip_carry_mm = max(max_slip_carry_mm, slip_mm_from(baseline_carry))
                 if done:
                     break
-            for _ in range(300):  # hold at the end of the carry
+            for _ in range(hold_steps_for(carry_distance, carry_accel, dt)):  # hold at the end of the carry
                 step(lift_height, carry_distance)
                 max_slip_carry_mm = max(max_slip_carry_mm, slip_mm_from(baseline_carry))
 
@@ -248,6 +265,7 @@ if __name__ == "__main__":
     p.add_argument("--carry-distance", type=float, default=0.2, help="m to move horizontally")
     p.add_argument("--carry-accel", type=float, default=1.0, help="m/s^2, the real carry_accel_ms2 controller param (datasheet range 0.5-6.0)")
     p.add_argument("--viewer", action="store_true")
+    p.add_argument("--seed", type=int, default=None, help="preview this seed's hidden friction draw + placement jitter (default: no jitter, nominal mu)")
     args = p.parse_args()
 
     result = run(
@@ -258,6 +276,7 @@ if __name__ == "__main__":
         args.carry_distance,
         args.carry_accel,
         args.viewer,
+        args.seed,
     )
     if not args.viewer:
         print("SIMULATION RESULT (headless):")
