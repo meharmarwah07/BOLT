@@ -124,6 +124,16 @@ FLEET_LLM_BASE_URL=http://<host>:<port>/v1 FLEET_LLM_MODEL=<model-name> \
 against a real, non-deterministic model; it's a no-op against the stub,
 which always answers the same way.
 
+`smoke_real.py` calls `solve()` sequentially (concurrency 1) and enforces a
+minimum gap between request starts, via `--min-interval-s` or
+`FLEET_MIN_INTERVAL_S` (default `4.0`, i.e. ≤15 requests/minute). Set it to
+`0` when running against the local stub to skip the wait.
+
+Each `runs/<timestamp>.json` also records `model`, `base_url` (never the
+key), `utc_date`, `reasoning_effort`, `min_interval_s`, `http_requests_made`
+(actual HTTP requests across the whole run, including retries),
+`http_429_count`, and `finish_reason_counts`.
+
 **What the numbers mean.** `smoke_real.py` prints, per object class and
 overall:
 - **valid-JSON rate** — fraction of calls that didn't end in `error` (i.e.
@@ -154,16 +164,22 @@ Part A's held-out-seed replay (CONTEXT.md section 8).
 |---|---|---|
 | `FLEET_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint base URL |
 | `FLEET_LLM_MODEL` | `stub-model` | model name sent in the request |
+| `FLEET_LLM_API_KEY` | (falls back to `RADEON_API_KEY`, then `"not-needed"`) | API key passed to the OpenAI client; never printed, logged, or written to `runs/*.json` |
+| `FLEET_LLM_REASONING_EFFORT` | unset | if set, sent as `reasoning_effort` on every request; omitted entirely otherwise (some endpoints silently drop it anyway) |
 | `FLEET_LLM_TIMEOUT_S` | `60` | per-request timeout (seconds) |
 | `FLEET_LLM_MAX_TOKENS` | `512` | `max_tokens` sent with each request; doubled (ceiling 2048) after a `finish_reason == "length"` reply |
-| `FLEET_LLM_RETRY_SLEEP_S` | `1` | sleep before a retry after a transient failure (set to `0` in tests) |
+| `FLEET_LLM_RETRY_SLEEP_S` | `1` | sleep before a retry after a non-429 transient failure (set to `0` in tests) |
+
+The OpenAI client is constructed with `max_retries=0` so the SDK never adds
+hidden retries on top of `solve()`'s own retry loop.
 
 ### Retry policy
 
 | Failure | Behaviour |
 |---|---|
 | Timeout, connection error | retry (counts as an attempt), sleep `FLEET_LLM_RETRY_SLEEP_S` first |
-| HTTP 429, HTTP 5xx | retry (counts as an attempt), same sleep |
+| HTTP 429 | retry (counts as an attempt), sleep the response's `Retry-After` header (capped at 90s, default 60s if missing/unparseable) plus up to 0.5s jitter |
+| HTTP 5xx | retry (counts as an attempt), sleep `FLEET_LLM_RETRY_SLEEP_S` first |
 | HTTP 400/401/403/404/409/422 (other 4xx) | fail fast, no retry — error includes the status code and first 200 chars of the response body |
 | `finish_reason == "length"` | do not feed the truncated text back; retry at most once with `max_tokens` doubled; a second `length` raises immediately naming `finish_reason=length` and the limit used |
 | Missing/empty `choices`, or missing `message` | raises `"malformed response: no choices"` internally and retries (counts as an attempt) |
@@ -180,14 +196,19 @@ Part A's held-out-seed replay (CONTEXT.md section 8).
 | `FAKE_HTTP_STATUS=500` | respond with this HTTP status instead of 200 |
 | `FAKE_EMPTY_CONTENT=1` | `message.content` is `null` instead of real text |
 | `FAKE_SLEEP_S=10` | sleep this many seconds before replying (for timeout testing) |
-| `FAKE_SCRIPT=<json>` | a JSON list of per-request step dicts (status, finish_reason, content, no_choices); the last step repeats once the list is exhausted. Takes priority over the flags above. |
+| `FAKE_SCRIPT=<json>` | a JSON list of per-request step dicts (status, retry_after, finish_reason, content, no_choices); the last step repeats once the list is exhausted. Takes priority over the flags above. |
 | (none set) | request 1 is bad, request 2+ is good — tests retry-recovers |
 
+A `FAKE_SCRIPT` step with `"status": 429` may also set `"retry_after": N` to
+send a `Retry-After: N` header on that response (also sent, with a fixed
+default of 60, when `FAKE_HTTP_STATUS=429` is used instead).
+
 `fake_server.py` also exposes `GET /__log__`, returning
-`{"count": N, "max_tokens": [...], "messages": [...]}` for the requests it
-has received so far, so tests can assert exactly how many requests were
-made, with what `max_tokens`, and with what message content (e.g. that the
-system prompt and few-shot examples actually reached the server).
+`{"count": N, "max_tokens": [...], "messages": [...], "reasoning_effort": [...]}`
+for the requests it has received so far, so tests can assert exactly how
+many requests were made, with what `max_tokens`, what message content
+(e.g. that the system prompt and few-shot examples actually reached the
+server), and whether `reasoning_effort` was sent.
 
 ## Known limits
 

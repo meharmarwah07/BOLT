@@ -181,7 +181,7 @@ def test_smoke_real_end_to_end_against_stub():
         os.makedirs(RUNS_DIR, exist_ok=True)
         before = set(os.listdir(RUNS_DIR))
 
-        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0"}
         result = subprocess.run(
             [sys.executable, "smoke_real.py"], cwd=HERE, env=solver_env,
             capture_output=True, text=True, timeout=60,
@@ -209,6 +209,119 @@ def test_smoke_real_end_to_end_against_stub():
         wait_for_port_free(PORT)
 
 
+def test_run_metadata_and_no_api_key_leak():
+    if port_is_open(PORT):
+        return False, f"port {PORT} is already in use"
+    secret = "sk-test-SECRET-should-never-leak-99887766"
+    server_env = {**os.environ, "FAKE_ALWAYS_GOOD": "1"}
+    server = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env=server_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not wait_for_port(PORT):
+            return False, "stub server never started"
+
+        os.makedirs(RUNS_DIR, exist_ok=True)
+        before = set(os.listdir(RUNS_DIR))
+
+        solver_env = {
+            **os.environ,
+            "FLEET_LLM_RETRY_SLEEP_S": "0",
+            "FLEET_MIN_INTERVAL_S": "0",
+            "FLEET_LLM_API_KEY": secret,
+            "FLEET_LLM_REASONING_EFFORT": "medium",
+        }
+        result = subprocess.run(
+            [sys.executable, "smoke_real.py"], cwd=HERE, env=solver_env,
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return False, f"smoke_real.py exited {result.returncode}: {result.stderr.strip()[:300]!r}"
+        if secret in result.stdout or secret in result.stderr:
+            return False, "API key leaked into smoke_real.py stdout/stderr"
+
+        new_files = set(os.listdir(RUNS_DIR)) - before
+        if not new_files:
+            return False, "smoke_real.py did not write a new file to llm/runs/"
+        results_path = os.path.join(RUNS_DIR, sorted(new_files)[-1])
+        with open(results_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+        if secret in raw_text:
+            return False, f"API key leaked into {results_path}"
+        data = json.loads(raw_text)
+
+        for field in ("model", "base_url", "utc_date", "reasoning_effort",
+                      "http_requests_made", "http_429_count", "finish_reason_counts"):
+            if field not in data:
+                return False, f"{field!r} missing from {results_path}"
+        if data["reasoning_effort"] != "medium":
+            return False, f"expected reasoning_effort='medium', got {data['reasoning_effort']!r}"
+        if data["http_requests_made"] < len(data.get("records", [])):
+            return False, (
+                f"http_requests_made={data['http_requests_made']} is less than "
+                f"number of records={len(data.get('records', []))}"
+            )
+        return True, ""
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        wait_for_port_free(PORT)
+
+
+def test_min_interval_enforced_between_requests():
+    if port_is_open(PORT):
+        return False, f"port {PORT} is already in use"
+    server_env = {**os.environ, "FAKE_ALWAYS_GOOD": "1"}
+    server = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env=server_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not wait_for_port(PORT):
+            return False, "stub server never started"
+
+        fast_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0"}
+        start = time.perf_counter()
+        result = subprocess.run(
+            [sys.executable, "smoke_real.py"], cwd=HERE, env=fast_env,
+            capture_output=True, text=True, timeout=60,
+        )
+        fast_elapsed = time.perf_counter() - start
+        if result.returncode != 0:
+            return False, f"(fast) exited {result.returncode}: {result.stderr.strip()[:300]!r}"
+
+        slow_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0.2"}
+        start = time.perf_counter()
+        result = subprocess.run(
+            [sys.executable, "smoke_real.py"], cwd=HERE, env=slow_env,
+            capture_output=True, text=True, timeout=60,
+        )
+        slow_elapsed = time.perf_counter() - start
+        if result.returncode != 0:
+            return False, f"(throttled) exited {result.returncode}: {result.stderr.strip()[:300]!r}"
+
+        expected_min_gap = 17 * 0.2  # 18 fixture reports -> 17 gaps between request starts
+        if (slow_elapsed - fast_elapsed) < expected_min_gap * 0.8:
+            return False, (
+                f"expected throttled run to take >= {expected_min_gap * 0.8:.2f}s longer than unthrottled "
+                f"(fast={fast_elapsed:.2f}s, slow={slow_elapsed:.2f}s)"
+            )
+        return True, ""
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        wait_for_port_free(PORT)
+
+
 TESTS = [
     ("fixtures match contracts-v0 shape, no hidden friction field", test_reports_match_contracts_v0_shape),
     ("fixture report ids are unique", test_report_ids_unique),
@@ -216,6 +329,8 @@ TESTS = [
     ("truth.json covers every report id and recomputes correctly", test_truth_covers_every_report_and_recomputes),
     ("score_call gives the right verdict on 5 hand-written cases", test_scoring_function_hand_written_cases),
     ("smoke_real.py runs end to end against the stub and writes a results file", test_smoke_real_end_to_end_against_stub),
+    ("runs/*.json carries model/base_url/date/reasoning_effort/counts, no API key leak", test_run_metadata_and_no_api_key_leak),
+    ("FLEET_MIN_INTERVAL_S throttles request starts", test_min_interval_enforced_between_requests),
 ]
 
 

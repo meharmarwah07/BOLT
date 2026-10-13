@@ -178,7 +178,7 @@ CASES = [
     ("HTTP 400", True, script_env([{"status": 400}]), {}, rejected("HTTP 400"), 1, None),
 
     ("HTTP 429-then-ok", True,
-     script_env([{"status": 429}, {"finish_reason": "stop", "content": "good"}]),
+     script_env([{"status": 429, "retry_after": 1}, {"finish_reason": "stop", "content": "good"}]),
      {}, accepted, 2, None),
 
     ("missing choices then ok", True,
@@ -266,11 +266,151 @@ def test_examples_exclude_glass_jar():
     return True, ""
 
 
+def test_retry_after_seconds_parsing():
+    import solver as solver_mod
+
+    class _FakeResponse:
+        def __init__(self, headers):
+            self.headers = headers
+
+    class _FakeError:
+        def __init__(self, headers):
+            self.response = _FakeResponse(headers)
+
+    cases = [
+        ({"Retry-After": "1"}, 1.0),
+        ({"Retry-After": "120"}, solver_mod.RETRY_AFTER_CAP_S),
+        ({}, solver_mod.RETRY_AFTER_DEFAULT_S),
+        ({"Retry-After": "not-a-number"}, solver_mod.RETRY_AFTER_DEFAULT_S),
+    ]
+    for headers, expected in cases:
+        got = solver_mod._retry_after_seconds(_FakeError(headers))
+        if got != expected:
+            return False, f"headers={headers}: expected {expected}, got {got}"
+    return True, ""
+
+
+def test_429_retry_after_is_honoured():
+    if port_is_open(PORT):
+        return False, f"port {PORT} is already in use"
+    env = {"FAKE_SCRIPT": json.dumps([{"status": 429, "retry_after": 1}, {"finish_reason": "stop", "content": "good"}])}
+    server = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, **env},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not wait_for_port(PORT):
+            return False, "stub server never started"
+        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        start = time.perf_counter()
+        result = subprocess.run(
+            [sys.executable, "solver.py"], cwd=HERE, env=solver_env,
+            capture_output=True, text=True, timeout=30,
+        )
+        elapsed = time.perf_counter() - start
+        if result.returncode != 0:
+            return False, f"returncode={result.returncode} stderr={result.stderr.strip()[:300]!r}"
+        if elapsed < 1.0:
+            return False, f"expected >= 1s sleep honouring Retry-After=1, took {elapsed:.2f}s"
+        log = fetch_log()
+        if log["count"] != 2:
+            return False, f"expected 2 requests, server saw {log['count']}"
+        return True, ""
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        wait_for_port_free(PORT)
+
+
+def test_reasoning_effort_sent_only_when_set():
+    if port_is_open(PORT):
+        return False, f"port {PORT} is already in use"
+    server = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, "FAKE_ALWAYS_GOOD": "1"},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not wait_for_port(PORT):
+            return False, "stub server never started"
+
+        base_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+
+        env_unset = dict(base_env)
+        env_unset.pop("FLEET_LLM_REASONING_EFFORT", None)
+        result = subprocess.run(
+            [sys.executable, "solver.py"], cwd=HERE, env=env_unset,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False, f"(unset) returncode={result.returncode} stderr={result.stderr.strip()[:300]!r}"
+        log = fetch_log()
+        if log["reasoning_effort"][-1] is not None:
+            return False, f"expected no reasoning_effort sent when unset, got {log['reasoning_effort'][-1]!r}"
+
+        env_set = dict(base_env)
+        env_set["FLEET_LLM_REASONING_EFFORT"] = "low"
+        result = subprocess.run(
+            [sys.executable, "solver.py"], cwd=HERE, env=env_set,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False, f"(set) returncode={result.returncode} stderr={result.stderr.strip()[:300]!r}"
+        log = fetch_log()
+        if log["reasoning_effort"][-1] != "low":
+            return False, f"expected reasoning_effort='low' sent, got {log['reasoning_effort'][-1]!r}"
+        return True, ""
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        wait_for_port_free(PORT)
+
+
+def test_api_key_never_appears_in_solver_output():
+    if port_is_open(PORT):
+        return False, f"port {PORT} is already in use"
+    secret = "sk-test-SECRET-should-never-leak-99887766"
+    server = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, "FAKE_HTTP_STATUS": "400"},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not wait_for_port(PORT):
+            return False, "stub server never started"
+        env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_LLM_API_KEY": secret}
+        result = subprocess.run(
+            [sys.executable, "solver.py"], cwd=HERE, env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+        if secret in result.stdout or secret in result.stderr:
+            return False, "API key leaked into solver.py stdout/stderr"
+        return True, ""
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        wait_for_port_free(PORT)
+
+
 UNIT_TESTS = [
     ("examples.json Rules pass rule_check.parse_reply", test_examples_pass_real_validator),
     ("system prompt non-empty and mentions no_safe_rule", test_system_prompt_nonempty_and_mentions_no_safe_rule),
     ("system prompt limits match rules/limits.py", test_system_prompt_limits_match_rules_limits),
     ("no example uses object_class=glass_jar (anchoring risk)", test_examples_exclude_glass_jar),
+    ("_retry_after_seconds parses/caps/defaults Retry-After", test_retry_after_seconds_parsing),
+    ("HTTP 429 Retry-After is honoured and retried", test_429_retry_after_is_honoured),
+    ("reasoning_effort is sent only when FLEET_LLM_REASONING_EFFORT is set", test_reasoning_effort_sent_only_when_set),
+    ("API key never appears in solver.py stdout/stderr", test_api_key_never_appears_in_solver_output),
 ]
 
 

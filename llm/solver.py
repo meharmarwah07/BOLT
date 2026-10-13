@@ -1,6 +1,7 @@
 """Solver: failure reports -> Rule or NoSafeRule, via an OpenAI-compatible chat endpoint."""
 import json
 import os
+import random
 import sys
 import time
 
@@ -23,11 +24,36 @@ from rules.limits import (
 
 BASE_URL = os.environ.get("FLEET_LLM_BASE_URL", "http://localhost:8000/v1")
 MODEL = os.environ.get("FLEET_LLM_MODEL", "stub-model")
+API_KEY = os.environ.get("FLEET_LLM_API_KEY") or os.environ.get("RADEON_API_KEY") or "not-needed"
 MAX_RETRIES = 2  # plus the first attempt = 3 tries total
 REQUEST_TIMEOUT_S = float(os.environ.get("FLEET_LLM_TIMEOUT_S", "60"))
 MAX_TOKENS = int(os.environ.get("FLEET_LLM_MAX_TOKENS", "512"))
 MAX_TOKENS_CEILING = 2048
 RETRY_SLEEP_S = float(os.environ.get("FLEET_LLM_RETRY_SLEEP_S", "1"))
+REASONING_EFFORT = os.environ.get("FLEET_LLM_REASONING_EFFORT") or None
+
+# 429 retry policy: sleep the server's Retry-After (capped), plus jitter, then retry.
+RETRY_AFTER_DEFAULT_S = 60.0
+RETRY_AFTER_CAP_S = 90.0
+RETRY_AFTER_JITTER_MAX_S = 0.5
+
+# Request-count / outcome counters for the current process, read by smoke_real.py.
+_METRICS = {"http_requests": 0, "http_429s": 0, "finish_reasons": {}}
+
+
+def reset_metrics():
+    _METRICS["http_requests"] = 0
+    _METRICS["http_429s"] = 0
+    _METRICS["finish_reasons"] = {}
+
+
+def get_metrics():
+    return {
+        "http_requests": _METRICS["http_requests"],
+        "http_429s": _METRICS["http_429s"],
+        "finish_reasons": dict(_METRICS["finish_reasons"]),
+    }
+
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 _SYSTEM_PROMPT_PATH = os.path.join(PROMPTS_DIR, "solver_system.txt")
@@ -69,10 +95,37 @@ class _TransientRequestError(Exception):
     """A request-level failure worth retrying: timeout, connection error, 5xx, 429."""
 
 
-def _call(client, messages, max_tokens):
+class _RateLimitTransientError(_TransientRequestError):
+    """A 429, carrying the server's requested backoff (seconds, already capped)."""
+
+    def __init__(self, message, retry_after_s):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
+def _retry_after_seconds(e):
+    headers = e.response.headers if e.response is not None else None
+    value = headers.get("Retry-After") if headers is not None else None
+    if value is None:
+        return RETRY_AFTER_DEFAULT_S
     try:
-        return client.chat.completions.create(model=MODEL, messages=messages, max_tokens=max_tokens)
-    except (APIConnectionError, RateLimitError, InternalServerError) as e:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return RETRY_AFTER_DEFAULT_S
+    return min(max(seconds, 0.0), RETRY_AFTER_CAP_S)
+
+
+def _call(client, messages, max_tokens):
+    kwargs = {}
+    if REASONING_EFFORT:
+        kwargs["reasoning_effort"] = REASONING_EFFORT
+    _METRICS["http_requests"] += 1
+    try:
+        return client.chat.completions.create(model=MODEL, messages=messages, max_tokens=max_tokens, **kwargs)
+    except RateLimitError as e:
+        _METRICS["http_429s"] += 1
+        raise _RateLimitTransientError(str(e), _retry_after_seconds(e)) from e
+    except (APIConnectionError, InternalServerError) as e:
         raise _TransientRequestError(str(e)) from e
     except APIStatusError as e:
         body = e.response.text[:200] if e.response is not None else ""
@@ -81,7 +134,7 @@ def _call(client, messages, max_tokens):
 
 def solve(failure_reports):
     try:
-        client = OpenAI(base_url=BASE_URL, api_key="not-needed", timeout=REQUEST_TIMEOUT_S, max_retries=0)
+        client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=REQUEST_TIMEOUT_S, max_retries=0)
     except Exception as e:
         raise RuntimeError(f"failed to construct OpenAI client: {e}") from e
 
@@ -100,6 +153,12 @@ def solve(failure_reports):
     for attempt in range(1 + MAX_RETRIES):
         try:
             response = _call(client, messages, max_tokens)
+        except _RateLimitTransientError as e:
+            last_err = f"request failed: {e}"
+            if attempt < MAX_RETRIES:
+                sleep_s = e.retry_after_s + random.uniform(0, RETRY_AFTER_JITTER_MAX_S)
+                time.sleep(sleep_s)
+            continue
         except _TransientRequestError as e:
             last_err = f"request failed: {e}"
             if attempt < MAX_RETRIES and RETRY_SLEEP_S > 0:
@@ -111,6 +170,7 @@ def solve(failure_reports):
             continue
 
         choice = response.choices[0]
+        _METRICS["finish_reasons"][choice.finish_reason] = _METRICS["finish_reasons"].get(choice.finish_reason, 0) + 1
         if choice.finish_reason == "length":
             if length_retry_used:
                 raise RuntimeError(

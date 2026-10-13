@@ -82,7 +82,21 @@ def score_call(report, truth_case, rule_or_none, error_text):
     return verdict
 
 
-def run_once(report):
+_last_request_start = None
+
+
+def throttle(min_interval_s):
+    """Enforce a minimum gap between request starts (concurrency 1)."""
+    global _last_request_start
+    if _last_request_start is not None:
+        wait_s = min_interval_s - (time.perf_counter() - _last_request_start)
+        if wait_s > 0:
+            time.sleep(wait_s)
+    _last_request_start = time.perf_counter()
+
+
+def run_once(report, min_interval_s):
+    throttle(min_interval_s)
     start = time.perf_counter()
     rule_or_none, error_text = None, None
     try:
@@ -125,11 +139,17 @@ def fmt_rate(label, stat):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repeats", type=int, default=1, help="sample each fixture this many times (default 1)")
+    parser.add_argument(
+        "--min-interval-s", type=float, default=float(os.environ.get("FLEET_MIN_INTERVAL_S", "4.0")),
+        help="minimum seconds between request starts; concurrency is always 1 (default 4.0, or $FLEET_MIN_INTERVAL_S)",
+    )
     args = parser.parse_args()
 
     reports, truth = load_fixtures()
+    solver.reset_metrics()
 
-    print(f"FLEET_LLM_BASE_URL={solver.BASE_URL}  FLEET_LLM_MODEL={solver.MODEL}  repeats={args.repeats}")
+    print(f"FLEET_LLM_BASE_URL={solver.BASE_URL}  FLEET_LLM_MODEL={solver.MODEL}  repeats={args.repeats}  "
+          f"min_interval_s={args.min_interval_s}  reasoning_effort={solver.REASONING_EFFORT}")
     print("NOTE: effectiveness/refusal verdicts below are an ANALYTIC stand-in")
     print("(N >= m*(g+a)/(2*mu)), not a MuJoCo simulator replay.\n")
 
@@ -137,7 +157,7 @@ def main():
     for report in reports:
         truth_case = truth[report["report_id"]]
         for repeat_index in range(args.repeats):
-            rule_or_none, error_text, latency_s = run_once(report)
+            rule_or_none, error_text, latency_s = run_once(report, args.min_interval_s)
             verdict = score_call(report, truth_case, rule_or_none, error_text)
             if isinstance(rule_or_none, (Rule, NoSafeRule)):
                 rule_field = rule_or_none.model_dump(mode="json")
@@ -171,13 +191,20 @@ def main():
     for label, stat in aggregate(records).items():
         print(fmt_rate(label, stat))
 
+    metrics = solver.get_metrics()
     os.makedirs(RUNS_DIR, exist_ok=True)
     out_path = os.path.join(RUNS_DIR, f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json")
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump({
-            "base_url": solver.BASE_URL,
+            "base_url": solver.BASE_URL,  # never includes the API key
             "model": solver.MODEL,
+            "utc_date": time.strftime("%Y-%m-%d", time.gmtime()),
+            "reasoning_effort": solver.REASONING_EFFORT,
             "repeats": args.repeats,
+            "min_interval_s": args.min_interval_s,
+            "http_requests_made": metrics["http_requests"],
+            "http_429_count": metrics["http_429s"],
+            "finish_reason_counts": metrics["finish_reasons"],
             "note": "effective/refusal_correct are an ANALYTIC stand-in (N >= m*(g+a)/(2*mu)), not simulator output",
             "records": records,
         }, f, indent=2)

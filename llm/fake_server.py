@@ -13,6 +13,7 @@ Env vars to force failure modes for testing:
 
 FAKE_SCRIPT step dict keys (all optional):
   status          HTTP status to send (default 200)
+  retry_after     if status == 429, send this value as the Retry-After header
   finish_reason   "stop" or "length" (default "stop")
   content         "good" | "bad" | "truncated" | "unknown_source" (default "good")
   no_choices      true -> response body has "choices": [] (overrides content/finish_reason)
@@ -20,11 +21,12 @@ FAKE_SCRIPT step dict keys (all optional):
 Default (no env vars): request 1 is bad, request 2+ is good (tests retry).
 
 Every request (successful or not) is recorded; GET /__log__ returns
-{"count": N, "max_tokens": [...], "messages": [...]}  -- the max_tokens and
-full "messages" list sent on each request, in order -- so tests can assert
-exactly how many requests were made, with what max_tokens, and with what
-message content, without the test process needing to share memory with
-this subprocess.
+{"count": N, "max_tokens": [...], "messages": [...], "reasoning_effort": [...]}
+-- the max_tokens, full "messages" list, and reasoning_effort (or None if
+absent) sent on each request, in order -- so tests can assert exactly how
+many requests were made, with what max_tokens, what message content, and
+whether reasoning_effort was sent, without the test process needing to
+share memory with this subprocess.
 """
 import json
 import os
@@ -90,7 +92,11 @@ class Handler(BaseHTTPRequestHandler):
             req_body = json.loads(body_bytes) if body_bytes else {}
         except json.JSONDecodeError:
             req_body = {}
-        request_log.append({"max_tokens": req_body.get("max_tokens"), "messages": req_body.get("messages")})
+        request_log.append({
+            "max_tokens": req_body.get("max_tokens"),
+            "messages": req_body.get("messages"),
+            "reasoning_effort": req_body.get("reasoning_effort"),
+        })
         source_ids = _extract_report_ids(req_body) or ["fr_0001"]
 
         if SLEEP_S > 0:
@@ -102,7 +108,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if HTTP_STATUS != 200:
-            self._send_json(HTTP_STATUS, {"error": "simulated server error"})
+            headers = {"Retry-After": "60"} if HTTP_STATUS == 429 else None
+            self._send_json(HTTP_STATUS, {"error": "simulated server error"}, extra_headers=headers)
             return
 
         if EMPTY_CONTENT:
@@ -122,6 +129,7 @@ class Handler(BaseHTTPRequestHandler):
                 "count": request_count,
                 "max_tokens": [r["max_tokens"] for r in request_log],
                 "messages": [r["messages"] for r in request_log],
+                "reasoning_effort": [r["reasoning_effort"] for r in request_log],
             })
             return
         self.send_response(404)
@@ -130,7 +138,10 @@ class Handler(BaseHTTPRequestHandler):
     def _respond_scripted(self, step, source_ids):
         status = step.get("status", 200)
         if status != 200:
-            self._send_json(status, {"error": "simulated server error"})
+            headers = None
+            if status == 429 and "retry_after" in step:
+                headers = {"Retry-After": str(step["retry_after"])}
+            self._send_json(status, {"error": "simulated server error"}, extra_headers=headers)
             return
         if step.get("no_choices"):
             self._send_json(200, {"id": "chatcmpl-fake", "object": "chat.completion", "choices": []})
@@ -159,11 +170,13 @@ class Handler(BaseHTTPRequestHandler):
             ],
         }
 
-    def _send_json(self, status, obj):
+    def _send_json(self, status, obj, extra_headers=None):
         payload = json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
 
