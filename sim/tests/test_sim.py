@@ -178,6 +178,39 @@ def test_no_friction_or_mu_in_failure_report():
     assert '"mu"' not in serialized
 
 
+# min_grip(6.0)/min_grip(0.5), 6 seeds (0-5), 10 bisection iterations,
+# measured on this build. An audit found this ratio nearly inert
+# (1.06-1.13 over a larger 30-seed/5-accel sweep vs ~1.5 naively predicted
+# from the quasi-static formula) and an experiment coupling the lift's
+# acceleration to carry_accel_ms2 (so a low accel setting also slows the
+# lift, not just the carry) was tried and rejected -- it only moved the
+# ratio to 1.06-1.15, nowhere near the 1.2 keep/revert bar, because the
+# sim's drop criterion (a fixed 20mm slip budget over the fixed
+# PHASE_OBSERVE_S=1.6s window, see cell_model.py) is dominated by a
+# near-constant creep rate, not by the inertial force term accel changes
+# -- see STATUS.md. This locks in the *current* (unchanged) behavior so
+# the lever can't silently regress to fully inert (ratio -> 1.0) without
+# a test failure; it is not a claim that 1.2+ is achievable here.
+MEASURED_ACCEL_RATIO = {"steel": 1.027, "cardboard": 1.118, "glass_jar": 1.126}
+
+
+@pytest.mark.parametrize("object_class", ["steel", "cardboard", "glass_jar"])
+def test_accel_lever_ratio_not_inert(object_class):
+    seeds = range(6)
+    g_lo = [_bisect_min_holding_grip(object_class, s, accel=0.5, iters=10) for s in seeds]
+    g_hi = [_bisect_min_holding_grip(object_class, s, accel=6.0, iters=10) for s in seeds]
+    ratio = (sum(g_hi) / len(g_hi)) / (sum(g_lo) / len(g_lo))
+    expected = MEASURED_ACCEL_RATIO[object_class]
+    assert ratio >= 1.01, (
+        f"{object_class}: min_grip(6.0)/min_grip(0.5) ratio {ratio:.4f} has gone "
+        f"essentially inert (<=1.01) -- the accel lever has no effect"
+    )
+    assert expected - 0.08 <= ratio <= expected + 0.25, (
+        f"{object_class}: ratio {ratio:.4f} is outside the documented band "
+        f"around the measured {expected} (-0.08/+0.25)"
+    )
+
+
 def test_held_out_seeds_not_used_by_default():
     assert HELD_OUT_SEEDS == range(1000, 1200)
     assert set(TRAIN_SEEDS).isdisjoint(set(HELD_OUT_SEEDS))

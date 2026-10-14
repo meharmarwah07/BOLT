@@ -43,11 +43,12 @@ def nominal_friction(object_class):
 
 XML_TEMPLATE = """
 <mujoco>
-  <!-- noslip_iterations=0 (the default) lets MuJoCo's soft-contact solver
-       allow a slow, persistent sliding creep even on a grip well within
-       the friction cone (measured: ~2.2 mm/s of pure numerical slip at
-       grip_force=20N, holding static). The dedicated no-slip post-solve
-       pass eliminates it (measured: 0.000 mm over a 5 s hold). -->
+  <!-- noslip_iterations=5 enables MuJoCo's dedicated no-slip post-solve
+       pass. An earlier version of this comment claimed noslip_iterations=0
+       (the default) produced ~2.2 mm/s of persistent numerical slip at
+       grip_force=20N holding static; that could not be reproduced on this
+       build (measured <0.001mm over a 5s static hold at both 0 and 5) and
+       has been removed rather than left uncorrected. -->
   <option timestep="0.002" gravity="0 0 -9.81" noslip_iterations="5"/>
 
   <worldbody>

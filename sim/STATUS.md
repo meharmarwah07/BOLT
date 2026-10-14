@@ -232,3 +232,83 @@ trials in 301.6s on this machine — single-process, not using
    downstream until that's addressed on the Part B side.
 4. Parallel speedup (~3.3x) is measured on this dev machine only, same
    caveat as before — still untested on the target cloud instance.
+
+## 6. Accel lever audited as near-inert — experiment tried, rejected
+
+An audit found `min_grip(6.0)/min_grip(0.5)` only 1.06-1.13 per class (see
+item 5's sweep table), against a naive ~1.5 predicted from the
+quasi-static formula. Root cause: `LIFT_ACCEL_MS2` in `run_trial.py` is
+hardcoded at 1.0 regardless of the controller's `carry_accel_ms2`, so a
+low `carry_accel_ms2` setting only ever acts during the carry phase —
+the lift phase (and its `max_slip_mm`, which then carries forward as the
+floor `max_slip_mm` starts from in the carry phase) is unaffected by it.
+
+**Experiment:** changed the lift phase's acceleration argument from the
+fixed `LIFT_ACCEL_MS2` to `min(LIFT_ACCEL_MS2, carry_accel_ms2)`, so a low
+accel setting slows the lift too, and reran the min-holding-grip sweep (3
+classes × 30 seeds × accel {0.5, 1, 2, 4, 6}, bisection, same method as
+item 5's table):
+
+| class | condition | mean min_grip(0.5) | mean min_grip(6.0) | ratio |
+|---|---|---|---|---|
+| steel | before | 4.002 | 4.240 | 1.060 |
+| steel | after | 4.002 | 4.240 | 1.060 |
+| cardboard | before | 1.935 | 2.188 | 1.131 |
+| cardboard | after | 1.897 | 2.188 | 1.153 |
+| glass_jar | before | 18.152 | 19.900 | 1.096 |
+| glass_jar | after | 17.871 | 19.900 | 1.114 |
+
+glass_jar feasibility at 25N (its crush_limit_n — grip > crush_limit
+crushes, so 25N exactly never crushes), 100 seeds:
+
+| condition | accel=0.5 ok% | accel=6.0 ok% |
+|---|---|---|
+| before | 84% | 72% |
+| after | 85% | 72% |
+
+**Decision: reverted (kept original, uncoupled behavior).** None of the
+three classes reached the 1.2 ratio bar — cardboard's `after` (1.153) got
+closest, steel's `after` was statistically indistinguishable from
+`before` (per-seed values did shift, both up and down, by about one
+bisection grid step, but netted to the same mean over 30 seeds). `accel
+>= 1.0` is unaffected by construction (`min(1.0, accel) == 1.0` there),
+so the only accel value this change can ever touch is 0.5, and even
+there the achievable improvement is capped by how small the lift's
+inertial-force term (`m*accel/(2*mu)`) is relative to its gravity term
+(`m*g/(2*mu)`) — accel 1.0→0.5 is only a ~5% change in `g+accel`. The
+dominant effect on `min_grip` is the sim's fixed drop criterion (20mm
+slip within the fixed `PHASE_OBSERVE_S=1.6s` window, see item 2 above
+and `cell_model.py`), which per item 2's own unexplained note is governed
+by a near-constant, largely accel-independent creep rate close to the
+static friction limit — that creep swamps the small accel-driven inertial
+term `run_trial.py`'s lift/carry split was supposed to expose. **The
+accel lever's near-inertness is a property of the drop criterion, not
+primarily of the lift/carry accel coupling bug** — decoupling them helps
+marginally (cardboard, glass_jar) or not at all (steel), never close to
+1.2x.
+
+**Drop criterion, stated plainly (per request):** a trial drops when
+accumulated slip exceeds `SLIP_DROP_THRESHOLD_MM = 20.0mm` within the
+fixed `PHASE_OBSERVE_S = 1.6s` observation window (move + hold, both
+lift and carry phases). This threshold is **only valid at that fixed
+window** — item 2's own measurement found a longer 3.0s window needs
+60-180% more grip to clear the same 20mm bar (roughly ±55% around the
+1.6s numbers depending on class/seed), because a near-equilibrium grip
+gets more time to creep past 20mm the longer the window runs. Any
+min-holding-grip number in this file (items 5 and this one) is only
+comparable to another number measured at the *same* `PHASE_OBSERVE_S` —
+they are not portable to a different window length.
+
+**Regression test added:** `test_accel_lever_ratio_not_inert` in
+`tests/test_sim.py`, parametrized over the three classes, bisects
+`min_grip` at accel 0.5 and 6.0 (6 seeds, 10 iterations — cheaper than
+this section's 30-seed/14-iteration sweep) and asserts the ratio both
+clears a hard floor of 1.01 (so the lever can't silently regress to
+exactly inert) and stays within ±0.08/+0.25 of the value measured here,
+per class.
+
+**Also fixed:** `cell_model.py`'s `noslip_iterations` XML comment claimed
+"~2.2 mm/s of pure numerical slip" at `noslip_iterations=0`. Could not
+reproduce — a direct static-hold measurement (grip=20N, steel, 5s) gave
+<0.001mm either way (noslip_iterations 0 or 5). Comment corrected to say
+so rather than carry an unverifiable number forward.
