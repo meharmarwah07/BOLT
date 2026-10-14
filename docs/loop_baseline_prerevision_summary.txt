@@ -1,3 +1,7 @@
 run 1: no rule (9 attempts, real model, loop_20261014T185220Z.json)
 run 2: no rule
 run 3: no rule
+run 4: first attempt interrupted by user (Ctrl+C), rerun below
+run 4: no rule
+run 5: no rule
+note: run 3 had 1 infrastructure error (HTTP 429 rate limit, round 2 candidate 1); run 4 first attempt interrupted by user and rerun; totals over 5 runs: 45 attempts, 31 rules rejected by Check 1, 13 declines, 1 error, 0 accepted
