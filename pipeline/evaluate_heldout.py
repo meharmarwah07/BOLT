@@ -7,7 +7,15 @@ and the real audit log -- a denied Cell C is evaluated unchanged (no
 rule effect), matching what actually happens in the real pipeline. Also
 reports three baselines on the same seeds for context: no rule, a naive
 "grip 0.9x crush limit with minimum accel" heuristic, and a grid-searched
-"mildest passing rule" found via check1() alone (no LLM).
+"mildest passing rule" found via check1() alone (no LLM) -- that grid
+search now uses check1()'s default gate (CHECK1_VERSION); if no grid point
+clears it, the JSON/.md report say so explicitly ("none passes vN")
+instead of silently reporting the unchanged baseline as if it were a rule.
+
+Per-seed outcome/crush/duration (not just aggregates) is stored for every
+condition in the JSON output, and the .md output adds a paired exact
+McNemar table (accepted_rule vs each baseline, task success) per cell,
+plus a task-success-rate and mean-duration column on the main table.
 
 Refuses to run without --held-out (CONTEXT.md: "held-out seeds ... used
 only for the final measurement"). Every actual run is appended to
@@ -31,6 +39,8 @@ for _p in (PIPELINE_DIR, SIM_DIR, LLM_DIR):
 
 import check1 as check1_mod  # pipeline/check1.py
 from batch import run_batch  # sim/batch.py
+from cell_model import phase_duration  # sim/cell_model.py
+from run_trial import CARRY_DISTANCE_M  # sim/run_trial.py
 import stats as llm_stats  # llm/stats.py
 
 from rules import lifecycle
@@ -60,9 +70,17 @@ OWNER_C = "owner2"
 
 # Grid search ("mildest passing rule", no LLM) on TRAIN seeds only -- never
 # held-out, matching CONTEXT.md's "never use [held-out seeds] while
-# iterating on a rule". Resolution/seed count are kept small so this
-# script stays fast; this is a comparison baseline, not Check 1 itself.
-GRID_TRAIN_SEEDS = range(15)
+# iterating on a rule". This is a comparison baseline, not Check 1 itself.
+#
+# Was range(15): too few for check1()'s now-default v2 gate to ever pass at
+# all, regardless of the candidate -- v2's MAX_AFTER_DROP_RATE_CI95_UPPER
+# (0.10) Wilson upper bound can't clear 0.10 at n=15 even at zero observed
+# drops (the Wilson upper bound at k=0 only drops below 0.10 once n>=35).
+# At range(15), "no grid point passes v2" would reflect a statistics
+# floor, not a real finding about the grid. 50 clears that floor with a
+# margin (Wilson upper at k=0,n=50 is ~0.071) while keeping the grid's
+# GRID_RESOLUTION**2 batches reasonably fast.
+GRID_TRAIN_SEEDS = range(50)
 GRID_RESOLUTION = 6
 
 # "Ceiling" baseline: grip just under the class's crush limit (as close
@@ -156,25 +174,37 @@ def _measure(target_class, cell_label, seeds, conditions):
     not evaluated" (used for a denied share). Returns {name: row dict}."""
     rows = {}
     baseline_batch = run_batch(target_class, conditions["none"], seeds, parallel=True)
-    rows["none"] = _row(baseline_batch, baseline_batch)
+    rows["none"] = _row(baseline_batch, baseline_batch, conditions["none"])
     for name, params in conditions.items():
         if name == "none":
             continue
         batch = run_batch(target_class, params, seeds, parallel=True) if params is not None else baseline_batch
-        rows[name] = _row(baseline_batch, batch)
+        rows[name] = _row(baseline_batch, batch, params if params is not None else conditions["none"])
     return rows
 
 
-def _row(baseline_batch, batch):
+def _row(baseline_batch, batch, controller_params):
     fixed, newly_broken = _paired_counts(baseline_batch.results, batch.results)
+    # duration_s is a function of carry_accel_ms2 alone (sim/cell_model.py's
+    # phase_duration), so it is identical for every seed under one
+    # condition -- stored per seed anyway (not just as one aggregate
+    # number) so downstream per-seed analysis doesn't have to re-derive it
+    # from controller_params itself.
+    duration_s = phase_duration(CARRY_DISTANCE_M, controller_params["carry_accel_ms2"])
+    n_ok = sum(1 for r in batch.results if r.outcome == "ok")
     return {
         "n_trials": batch.n_trials,
         "n_drop": batch.n_drop,
         "n_crush": batch.n_crush,
         "drop_rate": batch.drop_rate,
         "drop_rate_ci95": list(llm_stats.wilson(batch.n_drop, batch.n_trials)),
+        "task_success_rate": round(n_ok / batch.n_trials, 4) if batch.n_trials else 0.0,
+        "mean_duration_s": round(duration_s, 4),
         "seeds_fixed_vs_baseline": fixed,
         "seeds_newly_broken_vs_baseline": newly_broken,
+        "outcomes_by_seed": [
+            {"seed": r.seed, "outcome": r.outcome, "duration_s": round(duration_s, 4)} for r in batch.results
+        ],
     }
 
 
@@ -182,8 +212,9 @@ def _markdown_table(cell_label, rows, controller_by_condition):
     lines = [
         f"### Cell {cell_label}",
         "",
-        "| condition | grip_force_n | carry_accel_ms2 | n | drops | crushes | drop rate | 95% CI | fixed | newly broken |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| condition | grip_force_n | carry_accel_ms2 | n | drops | crushes | drop rate | 95% CI | "
+        "task success | mean duration (s) | fixed | newly broken |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, row in rows.items():
         params = controller_by_condition.get(name) or {}
@@ -191,8 +222,37 @@ def _markdown_table(cell_label, rows, controller_by_condition):
         lines.append(
             f"| {name} | {params.get('grip_force_n', '-')} | {params.get('carry_accel_ms2', '-')} | "
             f"{row['n_trials']} | {row['n_drop']} | {row['n_crush']} | {row['drop_rate']:.3f} | "
-            f"[{ci[0]:.3f}, {ci[1]:.3f}] | {len(row['seeds_fixed_vs_baseline'])} | {len(row['seeds_newly_broken_vs_baseline'])} |"
+            f"[{ci[0]:.3f}, {ci[1]:.3f}] | {row['task_success_rate']:.3f} | {row['mean_duration_s']:.3f} | "
+            f"{len(row['seeds_fixed_vs_baseline'])} | {len(row['seeds_newly_broken_vs_baseline'])} |"
         )
+    return "\n".join(lines)
+
+
+def _mcnemar_table(cell_label, rows, accepted_name="accepted_rule"):
+    """Paired exact McNemar (two-sided), task-success (outcome == "ok") on
+    each seed, accepted_rule vs every other condition measured on this
+    cell's own seeds. b/c are the discordant counts stats.mcnemar_exact
+    needs; see its docstring. Returns "" if accepted_rule wasn't measured
+    on this cell (e.g. this cell's rows only cover the no-rule baseline).
+    """
+    if accepted_name not in rows:
+        return ""
+    accepted_success = {o["seed"]: o["outcome"] == "ok" for o in rows[accepted_name]["outcomes_by_seed"]}
+    lines = [
+        f"### Cell {cell_label}: paired exact McNemar ({accepted_name} vs each baseline, task success)",
+        "",
+        "| baseline | b (accepted-only success) | c (baseline-only success) | p-value (two-sided) |",
+        "|---|---|---|---|",
+    ]
+    for name, row in rows.items():
+        if name == accepted_name:
+            continue
+        other_success = {o["seed"]: o["outcome"] == "ok" for o in row["outcomes_by_seed"]}
+        common_seeds = sorted(set(accepted_success) & set(other_success))
+        b = sum(1 for s in common_seeds if accepted_success[s] and not other_success[s])
+        c = sum(1 for s in common_seeds if not accepted_success[s] and other_success[s])
+        p = llm_stats.mcnemar_exact(b, c)
+        lines.append(f"| {name} | {b} | {c} | {p:.4f} |")
     return "\n".join(lines)
 
 
@@ -286,6 +346,17 @@ def main():
         sys.exit(1)
 
     grid_rule = _grid_search_mildest_passing_rule(target_class, rule.source_report_ids)
+    grid_none_passes_note = None
+    if grid_rule is None:
+        grid_none_passes_note = (
+            f"none passes v{check1_mod.CHECK1_VERSION} -- no (grip, accel) grid point for "
+            f"{target_class!r} cleared Check 1 v{check1_mod.CHECK1_VERSION} on GRID_TRAIN_SEEDS "
+            f"{GRID_TRAIN_SEEDS.start}-{GRID_TRAIN_SEEDS.stop - 1} (resolution {GRID_RESOLUTION}x"
+            f"{GRID_RESOLUTION}). The 'grid_mildest_passing' row below is the UNCHANGED baseline "
+            "(no grid rule applied, not a real passing rule) -- see pipeline/dev_check.py for a "
+            "wider, dev-seed grid search of the same question."
+        )
+        print(f"NOTE: {grid_none_passes_note}", file=sys.stderr)
 
     crush_limit = CRUSH_LIMIT_N[target_class]
     naive_params = {
@@ -333,6 +404,7 @@ def main():
         "rule": rule.model_dump(mode="json"),
         "target_class": target_class,
         "grid_mildest_passing_rule": grid_rule.model_dump(mode="json") if grid_rule is not None else None,
+        "grid_mildest_passing_note": grid_none_passes_note,
         "naive_baseline_params": naive_params,
         "ceiling_params": ceiling_params,
         "results": results,
@@ -347,6 +419,8 @@ def main():
     if stub_banner:
         md_lines += [stub_banner, ""]
     md_lines += [top_notice, ""]
+    if grid_none_passes_note:
+        md_lines += [f"NOTE: {grid_none_passes_note}", ""]
     for cell_label, _seeds, _decision in cell_runs:
         md_lines.append(
             f"Cell {cell_label} can_share: allowed={results[cell_label]['can_share_decision']['allowed']} "
@@ -355,6 +429,10 @@ def main():
         md_lines.append("")
         md_lines.append(_markdown_table(cell_label, results[cell_label]["rows"], controller_by_condition_by_cell[cell_label]))
         md_lines.append("")
+        mcnemar_md = _mcnemar_table(cell_label, results[cell_label]["rows"])
+        if mcnemar_md:
+            md_lines.append(mcnemar_md)
+            md_lines.append("")
     md_path = os.path.join(RUNS_DIR, f"heldout_eval_{rule.rule_id}.md")
     with open(md_path, "w") as f:
         f.write("\n".join(md_lines))
