@@ -611,13 +611,16 @@ def test_mutation_crush_check_catches_regression():
         rules_limits.CRUSH_LIMIT_N["glass_jar"] = original_crush
 
 
-def test_check1_version_defaults_to_2():
-    if check1_mod.CHECK1_VERSION != 2:
-        return False, f"expected CHECK1_VERSION == 2, got {check1_mod.CHECK1_VERSION}"
+def test_check1_version_defaults_to_3():
+    """CHECK1_VERSION was bumped 2 -> 3 (v2.1) once dev_check.py's
+    --frontier sweep showed v2's own thresholds were unachievable (see
+    the "Check 1 v2.1" block's comment) -- v1 and v2 remain selectable."""
+    if check1_mod.CHECK1_VERSION != 3:
+        return False, f"expected CHECK1_VERSION == 3, got {check1_mod.CHECK1_VERSION}"
     rule = _rule(grip_force_min_n=6.0, carry_accel_max_ms2=6.0, object_class="steel")
     outcome = check1_mod.check1(rule, range(50))  # no version arg -- must use the default
-    if outcome.version != 2:
-        return False, f"expected outcome.version == 2 by default, got {outcome.version}"
+    if outcome.version != 3:
+        return False, f"expected outcome.version == 3 by default, got {outcome.version}"
     return True, ""
 
 
@@ -680,9 +683,11 @@ def test_v2_gate_pure_fails_on_crush():
 def test_v2_gate_integration_passes_real_sim():
     """End-to-end (real sim, not hand-simulated): a benign steel rule --
     baseline already holds 0/100 at grip=5N, so this rule changes nothing
-    -- clears v2 cleanly through the full check1() pipeline."""
+    -- clears v2 cleanly through the full check1() pipeline. version=2
+    pinned: this test is specifically about v2 (CHECK1_VERSION's own
+    default has since moved to 3/v2.1)."""
     rule = _rule(rule_id="r_v2_good_steel", object_class="steel", grip_force_min_n=6.0, carry_accel_max_ms2=6.0)
-    outcome = check1_mod.check1(rule, range(100))  # default version == 2
+    outcome = check1_mod.check1(rule, range(100), version=2)
     if not outcome.passed:
         return False, f"expected this steel rule to pass v2; reasons={outcome.reasons}"
     if outcome.crush_count_after != 0:
@@ -724,10 +729,10 @@ def test_check1_version_selectable_v1():
 def test_check1_unknown_version_raises():
     rule = _rule(**GOOD_GLASS_JAR)
     try:
-        check1_mod.check1(rule, range(5), version=3)
+        check1_mod.check1(rule, range(5), version=4)
     except ValueError:
         return True, ""
-    return False, "expected check1(..., version=3) to raise ValueError"
+    return False, "expected check1(..., version=4) to raise ValueError"
 
 
 def test_intervention_cost_reported():
@@ -744,6 +749,106 @@ def test_intervention_cost_reported():
         return False, "expected Check1Record.intervention_cost_grip to match Check1Outcome's"
     if not any("intervention cost" in r for r in outcome.reasons):
         return False, f"expected an 'intervention cost' line in reasons, got {outcome.reasons}"
+    return True, ""
+
+
+def test_v2_1_gate_pure_passes_good_numbers():
+    """Direct unit test of check1_mod._v2_1_primary_gate (no sim call)."""
+    ci95 = llm_stats_mod.wilson(5, 100)  # 5% combined failure
+    ok, reasons = check1_mod._v2_1_primary_gate(5, 0, 100, ci95)
+    if not ok:
+        return False, f"expected this to pass v2.1's primary gate; reasons={reasons}"
+    if reasons:
+        return False, f"expected no failure reasons on a pass, got {reasons}"
+    return True, ""
+
+
+def test_v2_1_gate_pure_fails_high_combined_failure():
+    """A rule with a measured 50% combined (drop+crush) failure must fail
+    v2.1's admission filter."""
+    ci95 = llm_stats_mod.wilson(50, 100)
+    ok, reasons = check1_mod._v2_1_primary_gate(30, 20, 100, ci95)
+    if ok:
+        return False, "expected a 50% combined-failure rule to fail v2.1's gate"
+    if not any("combined" in r for r in reasons):
+        return False, f"expected a combined-failure reason, got {reasons}"
+    return True, ""
+
+
+def test_v2_1_gate_counts_drop_and_crush_together():
+    """Confirms the gate looks at drop+crush combined, not drop alone: a
+    rule with 0% drop but 50% crush must still fail."""
+    ci95 = llm_stats_mod.wilson(50, 100)
+    ok, reasons = check1_mod._v2_1_primary_gate(0, 50, 100, ci95)
+    if ok:
+        return False, "expected a 0%-drop/50%-crush rule to fail v2.1's gate on combined failure"
+    return True, ""
+
+
+def test_v2_1_gate_integration_real_sim_zero_crush_option():
+    """End-to-end (real sim): grip=21.5N/accel=0.6 for glass_jar is the
+    measured best fully zero-crush fixed rule (pipeline/dev_check.py's
+    --frontier) -- clears v2.1's admission filter with real margin."""
+    rule = _rule(rule_id="r_v2_1_zero_crush", grip_force_min_n=21.5, carry_accel_max_ms2=0.6)
+    outcome = check1_mod.check1(rule, range(5000, 5100), version=3)
+    if not outcome.passed:
+        return False, f"expected this rule to pass v2.1; reasons={outcome.reasons}"
+    if outcome.crush_count_after != 0:
+        return False, f"expected crush_count 0, got {outcome.crush_count_after}"
+    if outcome.combined_failure_ci95[1] > check1_mod.MAX_COMBINED_FAILURE_CI95_UPPER:
+        return False, f"expected combined_failure_ci95 upper <= the admission filter; got {outcome.combined_failure_ci95}"
+    return True, ""
+
+
+def test_v2_1_gate_integration_real_sim_fails_on_high_failure():
+    """End-to-end (real sim): a glass_jar rule with grip barely above
+    nominal (5.0N -> 6.0N) still drops almost every seed -- fails v2.1."""
+    rule = _rule(rule_id="r_v2_1_too_weak", grip_force_min_n=6.0, carry_accel_max_ms2=1.0)
+    outcome = check1_mod.check1(rule, range(5000, 5100), version=3)
+    if outcome.passed:
+        return False, f"expected this weak rule to fail v2.1; reasons={outcome.reasons}"
+    return True, ""
+
+
+def test_v2_1_has_no_slowdown_gate():
+    """v2.1 dropped the slowdown gate entirely (see its own comment in
+    check1.py): a rule at the slowest legal accel (0.5, the maximum
+    possible slowdown_proxy ~1.41421) must not fail on slowdown alone."""
+    rule = _rule(rule_id="r_v2_1_slow_but_fine", object_class="steel", grip_force_min_n=6.0, carry_accel_max_ms2=0.5)
+    outcome = check1_mod.check1(rule, range(100), version=3)
+    if not outcome.passed:
+        return False, f"expected a slow-but-otherwise-good rule to pass v2.1; reasons={outcome.reasons}"
+    if any("slowdown" in r for r in outcome.reasons):
+        return False, f"expected no slowdown-related reason text under v2.1; got {outcome.reasons}"
+    return True, ""
+
+
+def test_check1_version_selectable_v2_1():
+    rule = _rule(rule_id="r_v2_1_selectable", grip_force_min_n=21.5, carry_accel_max_ms2=0.6)
+    outcome = check1_mod.check1(rule, range(5000, 5100), version=3)
+    if outcome.version != 3:
+        return False, f"expected outcome.version == 3, got {outcome.version}"
+    if not any("v2.1" in r for r in outcome.reasons):
+        return False, f"expected a 'v2.1' tagged reason, got {outcome.reasons}"
+    return True, ""
+
+
+def test_conditional_rule_passes_check1_end_to_end():
+    """Full pipeline: a conditional (grip_fraction) rule, through
+    rules.validate/apply and check1()'s real-sim replay and gate."""
+    rule = Rule(
+        rule_id="r_conditional_e2e", object_class="glass_jar", rule_type="conditional",
+        grip_fraction=0.9, carry_accel_max_ms2=0.6, proposed_by="test",
+        created_at=dt.datetime.now(dt.timezone.utc), rationale="conditional probe-based rule",
+        source_report_ids=["fr_0001"],
+    )
+    outcome = check1_mod.check1(rule, range(5000, 5100), version=3)
+    if outcome.record is None:
+        return False, "expected a Check1Record even if the rule failed"
+    if outcome.margin is None or abs(outcome.margin - (1.0 - 0.9)) > 1e-9:
+        return False, f"expected margin == 1 - grip_fraction == 0.1, got {outcome.margin}"
+    if outcome.intervention_cost_grip is None:
+        return False, "expected intervention_cost_grip to be computed (mean realized grip) for a conditional rule"
     return True, ""
 
 
@@ -766,7 +871,7 @@ UNIT_TESTS = [
     ("sim crush limits match rules.limits.CRUSH_LIMIT_N", test_sim_crush_limits_match_rules_limits),
     ("no API key in any pipeline output", test_no_api_key_in_loop_output),
     ("mutation: flipping the crush check must fail a test, then restore", test_mutation_crush_check_catches_regression),
-    ("CHECK1_VERSION defaults to 2", test_check1_version_defaults_to_2),
+    ("CHECK1_VERSION defaults to 3 (v2.1)", test_check1_version_defaults_to_3),
     ("v2 gate (pure): passes good numbers", test_v2_gate_pure_passes_good_numbers),
     ("v2 gate (pure): fails a 30%-drop rule", test_v2_gate_pure_fails_30pct_drop_rule),
     ("v2 gate (pure): fails a slow rule", test_v2_gate_pure_fails_slow_rule),
@@ -776,6 +881,14 @@ UNIT_TESTS = [
     ("check1 version is selectable: v1 still works", test_check1_version_selectable_v1),
     ("check1 rejects an unknown version", test_check1_unknown_version_raises),
     ("intervention cost is reported on Check1Outcome and Check1Record", test_intervention_cost_reported),
+    ("v2.1 gate (pure): passes good numbers", test_v2_1_gate_pure_passes_good_numbers),
+    ("v2.1 gate (pure): fails high combined failure", test_v2_1_gate_pure_fails_high_combined_failure),
+    ("v2.1 gate (pure): counts drop and crush together", test_v2_1_gate_counts_drop_and_crush_together),
+    ("v2.1 gate (real sim): zero-crush option passes", test_v2_1_gate_integration_real_sim_zero_crush_option),
+    ("v2.1 gate (real sim): a too-weak rule fails", test_v2_1_gate_integration_real_sim_fails_on_high_failure),
+    ("v2.1 has no slowdown gate", test_v2_1_has_no_slowdown_gate),
+    ("check1 version is selectable: v2.1 works", test_check1_version_selectable_v2_1),
+    ("conditional rule passes check1 end to end", test_conditional_rule_passes_check1_end_to_end),
 ]
 
 

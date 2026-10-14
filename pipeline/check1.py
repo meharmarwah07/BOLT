@@ -82,6 +82,57 @@ CHECK1_VERSION = 2
 MAX_AFTER_DROP_RATE_CI95_UPPER = 0.10  # Wilson 95% upper bound of drop_rate_after must be <= this.
 MAX_SLOWDOWN_PROXY = 1.5  # after/before carry-phase duration ratio must be <= this.
 
+# ---- Check 1 v2.1 (pre-registered v2.1, derived from dev seeds --------
+# 5000-5099, before any 3000+ run) --------------------------------------
+#
+# v2's two numbers above were guesses, not grounded in what's actually
+# achievable: pipeline/dev_check.py's --frontier sweep (dev seeds
+# 5000-5099, never train/held-out) showed NO fixed (grip, accel) rule for
+# glass_jar clears both an absolute drop rate <=0.10 AND zero crush --
+# raising grip trades a lower drop rate for a rising crush rate, and the
+# best achievable COMBINED (drop-or-crush) failure for any fixed rule is
+# ~23% (grip=22.5N, with a 1% crush rate); the best fully ZERO-CRUSH
+# option is ~25-28% (grip~21.5N, any accel in the legal range). Since a
+# comfortable zero-crush option exists close to the global optimum,
+# MAX_CRUSH_COUNT stays at 0 (unchanged from v1/v2) -- no crush tolerance
+# or crush weighting was introduced.
+#
+# Also found: MAX_SLOWDOWN_PROXY=1.5 could never fire for any legal rule
+# -- the achievable slowdown_proxy range is exactly [1.0, sqrt(2)~=1.41421]
+# (CARRY_ACCEL_MIN_MS2=0.5 is the datasheet floor). v2.1 drops the
+# slowdown gate entirely rather than replace it with another guess: there
+# is no stated cycle-time tolerance to derive a real cap from, and any
+# cap strictly between 1.0 and 1.41421 would just be an arbitrary toggle
+# on "is accel capped at the floor," not a grounded threshold.
+#
+# MAX_COMBINED_FAILURE_CI95_UPPER is an ADMISSION FILTER, not a
+# performance claim: 0.40 sits comfortably above grip~21.5's worst-case
+# measured Wilson upper bound (0.375 across every accel tried) -- it only
+# screens out rules clearly worse than the measured frontier, it does not
+# assert that a rule clearing it is actually good (that's what the
+# success criterion below is for).
+#
+# CHECK1_VERSION = 3 is v2.1 (the name stays "v2.1" in prose/reasons
+# text; the integer is just CHECK1_VERSION's next slot). version=1 and
+# version=2 remain fully selectable and unchanged -- neither was deleted.
+CHECK1_VERSION = 3
+MAX_COMBINED_FAILURE_CI95_UPPER = 0.40  # admission filter, not a performance claim.
+# (MAX_CRUSH_COUNT, MAX_NEWLY_BROKEN, and other-classes-unchanged are
+# reused unchanged from the v1/v2 block above -- see _common_gates.)
+
+# ---- Pre-registered success criterion, before any 3000+ run -----------
+#
+# NOT a check1() gate -- this does not participate in PASS/FAIL anywhere
+# in this file. It is the bar the FINAL held-out evaluation (seeds
+# 3000-3199, whenever that run happens) will judge the conditional rule
+# against, decided here on dev seeds only, before that run, per the same
+# "decide before you look at held-out data" discipline as every other
+# threshold in this file. pipeline/dev_check.py reads these constants to
+# report against them; nothing in check1() reads them.
+SUCCESS_CRITERION_PROBE_SIGMA = 0.03
+SUCCESS_CRITERION_MAX_COMBINED_FAILURE_CI95_UPPER = 0.15
+SUCCESS_CRITERION_MAX_MCNEMAR_P = 0.05  # vs the best fixed rule, same seeds, two-sided exact
+
 # "Without the rule" baseline controller settings -- the nominal, untuned
 # setting a rule is supposed to fix glass_jar at, without touching the
 # other two classes.
@@ -137,6 +188,8 @@ class Check1Outcome:
     version: int = 1  # which CHECK1_VERSION gate produced this outcome
     intervention_cost_grip: Optional[float] = None  # |after.grip - nominal.grip| / nominal.grip
     intervention_cost_accel: Optional[float] = None  # |after.accel - nominal.accel| / nominal.accel
+    combined_failure_rate: Optional[float] = None  # (drops_after + crush_count_after) / n_trials
+    combined_failure_ci95: Optional[tuple] = None  # Wilson 95% CI of the above; see MAX_COMBINED_FAILURE_CI95_UPPER
 
 
 def _failed(reasons, record=None) -> Check1Outcome:
@@ -178,8 +231,28 @@ def _v2_primary_gate(drop_rate_after, n_drop_after, n_trials_after, drop_rate_af
     return ok, reasons
 
 
+def _v2_1_primary_gate(n_drop_after, n_crush_after, n_trials_after, combined_failure_ci95):
+    """v2.1's own gate: Wilson 95% CI upper bound of the COMBINED (drop-or-
+    crush) after-rule failure rate <= MAX_COMBINED_FAILURE_CI95_UPPER. No
+    slowdown check (see the "Check 1 v2.1" block's comment for why it was
+    dropped rather than replaced). Pure function of already-computed
+    summary numbers -- no sim call -- so it's directly unit-testable.
+    """
+    n_fail = n_drop_after + n_crush_after
+    reasons = []
+    ok = True
+    if combined_failure_ci95[1] > MAX_COMBINED_FAILURE_CI95_UPPER:
+        reasons.append(
+            f"combined (drop-or-crush) failure rate {n_fail / n_trials_after:.3f} "
+            f"({n_fail}/{n_trials_after}), Wilson 95% CI upper bound {combined_failure_ci95[1]:.3f} "
+            f"exceeds the admission filter's <= {MAX_COMBINED_FAILURE_CI95_UPPER}"
+        )
+        ok = False
+    return ok, reasons
+
+
 def _common_gates(crush_count_after, seeds_newly_broken, other_classes_unchanged):
-    """Gates shared by v1 and v2, unchanged between the two versions."""
+    """Gates shared by v1, v2, and v2.1, unchanged across all three versions."""
     reasons = []
     ok = True
     if crush_count_after > MAX_CRUSH_COUNT:
@@ -211,15 +284,15 @@ def check1(
     BASELINE_PARAMS replay for every candidate.
 
     `version` selects the gate: 1 for the original fixed-rate-lower-bound
-    gate, 2 for the v2 gate (see the "Check 1 v2" block above). Defaults to
-    CHECK1_VERSION.
+    gate, 2 for the v2 gate, 3 for v2.1's combined-failure admission
+    filter (see their respective blocks above). Defaults to CHECK1_VERSION.
     """
     if train_seeds is None:
         train_seeds = DEFAULT_TRAIN_SEEDS
     if version is None:
         version = CHECK1_VERSION
-    if version not in (1, 2):
-        raise ValueError(f"unknown check1 version {version!r}; must be 1 or 2")
+    if version not in (1, 2, 3):
+        raise ValueError(f"unknown check1 version {version!r}; must be 1, 2, or 3")
 
     val = validate(rule)
     if not val.ok:
@@ -266,7 +339,14 @@ def check1(
             other_classes_unchanged = False
 
     crush_limit = CRUSH_LIMIT_N[target_class]
-    margin = 1.0 - rule.grip_force_min_n / crush_limit
+    if rule.rule_type == "conditional":
+        # Not a margin-to-the-true-crush-limit (that's now per-trial and
+        # stochastic, via the probe) -- this is how far below the PROBED
+        # reading the rule asks to stay, a different (and noisier) kind
+        # of margin than the fixed-rule one below.
+        margin = 1.0 - rule.grip_fraction
+    else:
+        margin = 1.0 - rule.grip_force_min_n / crush_limit
 
     before_duration = phase_duration(CARRY_DISTANCE_M, before_params["carry_accel_ms2"])
     after_duration = phase_duration(CARRY_DISTANCE_M, after_params["carry_accel_ms2"])
@@ -274,21 +354,37 @@ def check1(
 
     drop_rate_after_ci95 = llm_stats.wilson(after.n_drop, after.n_trials)
 
-    intervention_cost_grip = abs(after_params["grip_force_n"] - before_params["grip_force_n"]) / before_params["grip_force_n"]
+    if "grip_force_n" in after_params:
+        realized_after_grip = after_params["grip_force_n"]
+    else:
+        # Conditional rule: after_params has "grip_fraction", not a single
+        # grip value -- use the MEAN realized grip actually commanded
+        # across the batch (each TrialResult.controller["grip_force_n"]
+        # is that seed's real grip_fraction * probe_reading).
+        realized_after_grip = sum(r.controller["grip_force_n"] for r in after.results) / len(after.results)
+    intervention_cost_grip = abs(realized_after_grip - before_params["grip_force_n"]) / before_params["grip_force_n"]
     intervention_cost_accel = abs(after_params["carry_accel_ms2"] - before_params["carry_accel_ms2"]) / before_params["carry_accel_ms2"]
 
     n_baseline_drops = before.n_drop
     fixed_rate_ci95 = llm_stats.wilson(len(seeds_fixed), n_baseline_drops) if n_baseline_drops > 0 else None
+    n_fail_after = after.n_drop + after.n_crush
+    combined_failure_ci95 = llm_stats.wilson(n_fail_after, after.n_trials)
 
     if version == 1:
         primary_ok, primary_reasons = _v1_primary_gate(seeds_fixed, n_baseline_drops, fixed_rate_ci95)
-    else:
+    elif version == 2:
         primary_ok, primary_reasons = _v2_primary_gate(after.drop_rate, after.n_drop, after.n_trials, drop_rate_after_ci95, slowdown_proxy)
+    else:  # version == 3 (v2.1)
+        primary_ok, primary_reasons = _v2_1_primary_gate(after.n_drop, after.n_crush, after.n_trials, combined_failure_ci95)
     common_ok, common_reasons = _common_gates(crush_count_after, seeds_newly_broken, other_classes_unchanged)
 
+    after_grip_desc = (
+        f"{after_params['grip_force_n']}N" if "grip_force_n" in after_params
+        else f"grip_fraction={after_params['grip_fraction']} (mean realized {realized_after_grip:.2f}N)"
+    )
     reasons = [
         f"intervention cost: grip {intervention_cost_grip:+.1%} of nominal "
-        f"({before_params['grip_force_n']}N -> {after_params['grip_force_n']}N), accel "
+        f"({before_params['grip_force_n']}N -> {after_grip_desc}), accel "
         f"{intervention_cost_accel:+.1%} of nominal "
         f"({before_params['carry_accel_ms2']}m/s^2 -> {after_params['carry_accel_ms2']}m/s^2)"
     ] + primary_reasons + common_reasons
@@ -300,11 +396,17 @@ def check1(
                 f"passed (v1): validate ok, crush_count=0, newly_broken=0, fixed {len(seeds_fixed)}/{n_baseline_drops} "
                 f"(Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} >= {MIN_FIXED_RATE_CI95_LOWER})"
             )
-        else:
+        elif version == 2:
             reasons.append(
                 f"passed (v2): validate ok, crush_count=0, newly_broken=0, drop_rate_after={after.drop_rate:.3f} "
                 f"(Wilson 95% CI upper bound {drop_rate_after_ci95[1]:.3f} <= {MAX_AFTER_DROP_RATE_CI95_UPPER}), "
                 f"slowdown_proxy={slowdown_proxy:.3f} <= {MAX_SLOWDOWN_PROXY}"
+            )
+        else:
+            reasons.append(
+                f"passed (v2.1 admission filter): validate ok, crush_count=0, newly_broken=0, combined "
+                f"failure={n_fail_after / after.n_trials:.3f} (Wilson 95% CI upper bound "
+                f"{combined_failure_ci95[1]:.3f} <= {MAX_COMBINED_FAILURE_CI95_UPPER})"
             )
 
     record = Check1Record(
@@ -336,6 +438,8 @@ def check1(
         version=version,
         intervention_cost_grip=intervention_cost_grip,
         intervention_cost_accel=intervention_cost_accel,
+        combined_failure_rate=round(n_fail_after / after.n_trials, 4) if after.n_trials else 0.0,
+        combined_failure_ci95=combined_failure_ci95,
     )
 
 
