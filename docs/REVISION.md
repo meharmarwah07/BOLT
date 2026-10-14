@@ -14,3 +14,4 @@ Not changed: Check 1 gate and thresholds, selection key, MAX_ROUNDS=3, candidate
 Not disclosed to the model: the friction range, the crush-jitter distribution.
 
 Arms (same protocol, 5 runs each on train seeds 0-4 reports / Check 1 train seeds): A = DeepSeek-V4-Flash; B = Gemma via Token Factory if available. All runs reported, including no-rule runs and infrastructure errors.
+Availability check (15 Oct, before any revised run): the endpoint's /models lists Gemma-4-31B-IT, so arm B uses that exact name.
