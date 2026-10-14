@@ -21,6 +21,12 @@ def good(**overrides):
     return base
 
 
+def conditional_good(**overrides):
+    base = good(rule_type="conditional", grip_force_min_n=None, grip_fraction=0.9)
+    base.update(overrides)
+    return base
+
+
 # (name, data, expect_ok, substrings_expected_in_error_text)
 CASES = [
     ("all fields good", good(), True, []),
@@ -47,6 +53,16 @@ CASES = [
     ("bad schema_version", good(schema_version="2"), False, ["schema_version", "2", "unsupported"]),
     ("multiple errors at once", good(object_class="bottle", grip_force_min_n=99.0, source_report_ids=[]), False, ["object_class", "grip_force_min_n", "source_report_ids"]),
     ("not a dict or Rule", "just a string", False, ["dict or rules.schema.Rule"]),
+    # Phase B: the conditional rule type (grip = grip_fraction * probe reading).
+    ("conditional rule all fields good", conditional_good(), True, []),
+    ("conditional missing grip_fraction", {k: v for k, v in conditional_good().items() if k != "grip_fraction"}, False, ["grip_fraction", "missing"]),
+    ("conditional also sets grip_force_min_n", conditional_good(grip_force_min_n=14.0), False, ["grip_force_min_n", "must not be set"]),
+    ("conditional grip_fraction below absolute min", conditional_good(grip_fraction=0.01), False, ["grip_fraction=0.01", "range"]),
+    ("conditional grip_fraction above absolute max", conditional_good(grip_fraction=2.0), False, ["grip_fraction=2.0", "range"]),
+    ("conditional grip_fraction at boundary is ok", conditional_good(grip_fraction=1.5), True, []),
+    ("conditional NaN grip_fraction", conditional_good(grip_fraction=float("nan")), False, ["grip_fraction", "NaN"]),
+    ("fixed rule also sets grip_fraction", good(grip_fraction=0.9), False, ["grip_fraction", "must not be set"]),
+    ("unknown rule_type", conditional_good(rule_type="adaptive"), False, ["rule_type", "adaptive"]),
 ]
 
 

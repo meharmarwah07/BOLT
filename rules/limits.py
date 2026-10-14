@@ -27,3 +27,16 @@ CRUSH_LIMIT_N = {
 }
 
 OBJECT_CLASSES = tuple(CRUSH_LIMIT_N.keys())
+
+# Phase B: the conditional rule type's grip_fraction (grip = grip_fraction
+# * a noisy pre-grasp probe reading of the part's true crush limit --
+# sim/cell_model.py's probe_crush_limit_reading). Unlike grip_force_min_n,
+# this is a dimensionless ratio, not a force, so it needs its own range --
+# reused GRIP_FORCE_MIN_N/MAX_N would be the wrong units entirely.
+# PLACEHOLDER: a design choice, not a measured/agreed tolerance.
+# GRIP_FRACTION_MIN=0.1 is just a sanity floor against a near-zero grip;
+# GRIP_FRACTION_MAX=1.5 allows some deliberate overshoot past the raw
+# reading (in case a probe systematically under-reads) while still ruling
+# out an obviously-absurd request regardless of what the probe said.
+GRIP_FRACTION_MIN = 0.1
+GRIP_FRACTION_MAX = 1.5

@@ -21,14 +21,11 @@ from rules.limits import (
     CRUSH_LIMIT_N,
     GRIP_FORCE_MAX_N,
     GRIP_FORCE_MIN_N,
+    GRIP_FRACTION_MAX,
+    GRIP_FRACTION_MIN,
     OBJECT_CLASSES,
 )
 from rules.schema import SCHEMA_VERSION, Rule
-
-# Fields pydantic validates structurally; semantic checks below only run on
-# a field if it survived structural validation (so we don't, e.g., compare
-# a missing or non-numeric grip_force_min_n to a range).
-_NUMERIC_FIELDS = ("grip_force_min_n", "carry_accel_max_ms2")
 
 
 @dataclass
@@ -76,6 +73,9 @@ def _friendly_structural_message(err: dict, data: dict) -> str:
             f"object_class: unknown value {bad!r}; must be one of "
             f"{list(OBJECT_CLASSES)} -- choose one of these"
         )
+    if "literal_error" in etype and err["loc"] and err["loc"][0] == "rule_type":
+        bad = data.get("rule_type")
+        return f"rule_type: unknown value {bad!r}; must be 'fixed' or 'conditional'"
     if "float_parsing" in etype or "int_parsing" in etype or etype == "float_type":
         bad = _dig(data, err["loc"])
         return f"{loc}: expected a number, got {bad!r} ({type(bad).__name__})"
@@ -116,36 +116,55 @@ def _semantic_errors(data: dict) -> list[str]:
 
     object_class = data.get("object_class")
     class_known = object_class in OBJECT_CLASSES
+    rule_type = data.get("rule_type", "fixed")
 
-    for field_name in _NUMERIC_FIELDS:
-        if field_name not in data:
-            continue  # already reported as a missing field structurally
-        value = data[field_name]
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            continue  # already reported as a type error structurally
-        if math.isnan(value) or math.isinf(value):
-            errors.append(f"{field_name}: value is {value} (NaN/inf is not allowed); must be a finite number")
-            continue
+    errors.extend(_numeric_range_errors(data, "carry_accel_max_ms2", CARRY_ACCEL_MIN_MS2, CARRY_ACCEL_MAX_MS2))
 
-        if field_name == "grip_force_min_n":
-            lo, hi = GRIP_FORCE_MIN_N, GRIP_FORCE_MAX_N
+    # grip_force_min_n and grip_fraction are mutually exclusive, gated by
+    # rule_type -- an invalid rule_type is already a structural error (a
+    # pydantic Literal), so only "fixed"/"conditional" reach here.
+    if rule_type == "fixed":
+        if data.get("grip_fraction") is not None:
+            errors.append("grip_fraction: must not be set when rule_type='fixed' (use grip_force_min_n instead)")
+        if data.get("grip_force_min_n") is None:
+            errors.append("grip_force_min_n: missing; required when rule_type='fixed'")
         else:
-            lo, hi = CARRY_ACCEL_MIN_MS2, CARRY_ACCEL_MAX_MS2
-
-        if value < lo or value > hi:
-            errors.append(
-                f"{field_name}={value} is outside the allowed range [{lo}, {hi}]; "
-                f"choose a value between {lo} and {hi}"
-            )
-        elif field_name == "grip_force_min_n" and class_known:
-            crush_limit = CRUSH_LIMIT_N[object_class]
-            if value > crush_limit:
-                errors.append(
-                    f"grip_force_min_n={value} exceeds crush limit {crush_limit} N for "
-                    f"object_class {object_class!r}; choose a value between {lo} and {crush_limit}"
-                )
+            errors.extend(_numeric_range_errors(data, "grip_force_min_n", GRIP_FORCE_MIN_N, GRIP_FORCE_MAX_N))
+            value = data["grip_force_min_n"]
+            if class_known and isinstance(value, (int, float)) and not isinstance(value, bool):
+                crush_limit = CRUSH_LIMIT_N[object_class]
+                if GRIP_FORCE_MIN_N <= value <= GRIP_FORCE_MAX_N and value > crush_limit:
+                    errors.append(
+                        f"grip_force_min_n={value} exceeds crush limit {crush_limit} N for "
+                        f"object_class {object_class!r}; choose a value between {GRIP_FORCE_MIN_N} and {crush_limit}"
+                    )
+    elif rule_type == "conditional":
+        if data.get("grip_force_min_n") is not None:
+            errors.append("grip_force_min_n: must not be set when rule_type='conditional' (use grip_fraction instead)")
+        if data.get("grip_fraction") is None:
+            errors.append("grip_fraction: missing; required when rule_type='conditional'")
+        else:
+            errors.extend(_numeric_range_errors(data, "grip_fraction", GRIP_FRACTION_MIN, GRIP_FRACTION_MAX))
 
     return errors
+
+
+def _numeric_range_errors(data: dict, field_name: str, lo: float, hi: float) -> list[str]:
+    """[lo, hi] range + NaN/inf check for one numeric field, skipping
+    fields missing or already flagged as a type error structurally."""
+    if field_name not in data or data[field_name] is None:
+        return []
+    value = data[field_name]
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return []  # already reported as a type error structurally
+    if math.isnan(value) or math.isinf(value):
+        return [f"{field_name}: value is {value} (NaN/inf is not allowed); must be a finite number"]
+    if value < lo or value > hi:
+        return [
+            f"{field_name}={value} is outside the allowed range [{lo}, {hi}]; "
+            f"choose a value between {lo} and {hi}"
+        ]
+    return []
 
 
 def validate(rule) -> ValidationResult:

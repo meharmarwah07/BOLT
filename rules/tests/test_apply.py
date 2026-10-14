@@ -145,3 +145,73 @@ def test_remove_rule_is_simple_list_removal_for_unknown_id(rule_factory):
     cell = CellState("A", "owner1", base, (r1,))
     unchanged = remove_rule(cell, "does_not_exist")
     assert unchanged.active_rules == (r1,)
+
+
+# ---- Phase B: the conditional rule type (grip = grip_fraction * probe) ----
+
+def _conditional_rule(rule_factory, **overrides):
+    overrides.setdefault("rule_id", "r_cond")
+    overrides.setdefault("object_class", "glass_jar")
+    overrides.setdefault("rule_type", "conditional")
+    overrides.setdefault("grip_force_min_n", None)
+    overrides.setdefault("grip_fraction", 0.9)
+    overrides.setdefault("carry_accel_max_ms2", 0.6)
+    return rule_factory(**overrides)
+
+
+def test_apply_conditional_returns_grip_fraction_shaped_params(rule_factory):
+    rule = _conditional_rule(rule_factory, grip_fraction=0.9, carry_accel_max_ms2=0.6)
+    result = apply(rule, {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}, "glass_jar")
+    assert result == {"grip_fraction": 0.9, "carry_accel_ms2": 0.6}
+
+
+def test_apply_conditional_accel_clamps_same_as_fixed(rule_factory):
+    rule = _conditional_rule(rule_factory, carry_accel_max_ms2=3.0)  # above baseline accel 1.0
+    result = apply(rule, {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}, "glass_jar")
+    assert result["carry_accel_ms2"] == 1.0  # clamped, not raised to 3.0
+
+
+def test_apply_conditional_rejects_accel_below_datasheet_min(rule_factory):
+    rule = _conditional_rule(rule_factory, carry_accel_max_ms2=CARRY_ACCEL_MIN_MS2 - 0.1)
+    with pytest.raises(RuleRejected):
+        apply(rule, {"grip_force_n": 5.0, "carry_accel_ms2": 3.0}, "glass_jar")
+
+
+def test_apply_conditional_class_mismatch_is_a_noop(rule_factory):
+    rule = _conditional_rule(rule_factory, object_class="glass_jar")
+    params = {"grip_force_n": 8.0, "carry_accel_ms2": 3.0}
+    result = apply(rule, params, "steel")
+    assert result == params
+
+
+def test_apply_conditional_is_idempotent(rule_factory):
+    rule = _conditional_rule(rule_factory, grip_fraction=0.85, carry_accel_max_ms2=0.7)
+    once = apply(rule, {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}, "glass_jar")
+    twice = apply(rule, once, "glass_jar")
+    assert once == twice
+
+
+def test_effective_settings_single_conditional_rule(rule_factory):
+    base = {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}
+    cell = CellState("A", "owner1", base)
+    rule = _conditional_rule(rule_factory, grip_fraction=0.9, carry_accel_max_ms2=0.6)
+    cell = add_rule(cell, rule)
+    assert effective_settings(cell, "glass_jar") == {"grip_fraction": 0.9, "carry_accel_ms2": 0.6}
+
+
+def test_effective_settings_two_conditional_rules_max_fraction_wins(rule_factory):
+    base = {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}
+    r_lo = _conditional_rule(rule_factory, rule_id="r_lo", grip_fraction=0.7, carry_accel_max_ms2=1.0)
+    r_hi = _conditional_rule(rule_factory, rule_id="r_hi", grip_fraction=0.9, carry_accel_max_ms2=0.8)
+    cell = CellState("A", "owner1", base, (r_lo, r_hi))
+    result = effective_settings(cell, "glass_jar")
+    assert result == {"grip_fraction": 0.9, "carry_accel_ms2": 0.8}
+
+
+def test_effective_settings_rejects_mixed_fixed_and_conditional(rule_factory):
+    base = {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}
+    r_fixed = rule_factory(rule_id="r_fixed", object_class="glass_jar", grip_force_min_n=14.0, carry_accel_max_ms2=2.5)
+    r_cond = _conditional_rule(rule_factory, rule_id="r_cond")
+    cell = CellState("A", "owner1", base, (r_fixed, r_cond))
+    with pytest.raises(RuleRejected):
+        effective_settings(cell, "glass_jar")

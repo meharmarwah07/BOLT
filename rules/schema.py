@@ -15,6 +15,7 @@ message.
 """
 import datetime as dt
 from enum import Enum
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +26,14 @@ SCHEMA_VERSION = "1"
 # Built from limits.OBJECT_CLASSES so the two never drift apart.
 ObjectClass = Enum("ObjectClass", {name.upper(): name for name in OBJECT_CLASSES}, type=str)
 
+# Phase B: a second rule_type alongside the original "fixed" grip. A
+# "conditional" rule's realized grip is grip_fraction * a noisy pre-grasp
+# probe reading of the part's true crush limit (sim/cell_model.py's
+# probe_crush_limit_reading), decided per trial, not a single fixed
+# number -- so it uses grip_fraction instead of grip_force_min_n.
+# carry_accel_max_ms2 means the same thing (an accel cap) for both types.
+RuleType = Literal["fixed", "conditional"]
+
 
 class Rule(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -32,7 +41,15 @@ class Rule(BaseModel):
     schema_version: str = SCHEMA_VERSION
     rule_id: str
     object_class: ObjectClass
-    grip_force_min_n: float
+    rule_type: RuleType = "fixed"
+    # Exactly one of these two is set, enforced semantically in
+    # validate.py (not structurally here, since pydantic has no clean
+    # "exactly one of" constraint and the per-field error messages validate.py
+    # already gives are more LLM-actionable than pydantic's own). Both
+    # Optional, defaulting to None, so every EXISTING "fixed" rule
+    # (rule_type omitted, grip_force_min_n always set) is unaffected.
+    grip_force_min_n: Optional[float] = None  # "fixed" rules only
+    grip_fraction: Optional[float] = None  # "conditional" rules only
     carry_accel_max_ms2: float
     proposed_by: str
     created_at: dt.datetime
