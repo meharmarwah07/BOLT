@@ -293,3 +293,81 @@ def test_baseline_params_never_crush_despite_jitter():
             f"{cls}: worst-case jittered crush limit {worst_case_limit} is not safely "
             "above BASELINE_PARAMS' grip_force_n=5.0"
         )
+
+
+# ---- Phase B: probe_crush_limit_reading (the pre-grasp sensor observable) ----
+
+def test_probe_reading_deterministic_per_seed():
+    a = cell_model.probe_crush_limit_reading("glass_jar", seed=7)
+    b = cell_model.probe_crush_limit_reading("glass_jar", seed=7)
+    assert a == b
+
+
+def test_probe_reading_sigma_zero_equals_true_limit():
+    for cls in OBJECT_CLASSES:
+        reading = cell_model.probe_crush_limit_reading(cls, seed=3, sigma=0.0)
+        true_limit = cell_model.jittered_crush_limit_n(cls, seed=3)
+        assert reading == true_limit
+
+
+def test_probe_reading_varies_with_seed_and_sigma():
+    readings = {cell_model.probe_crush_limit_reading("glass_jar", s) for s in range(10)}
+    assert len(readings) > 1  # not silently inert across seeds
+
+    # Larger sigma -> larger average absolute deviation from the true limit.
+    def _mean_abs_dev(sigma):
+        devs = []
+        for s in range(30):
+            true_limit = cell_model.jittered_crush_limit_n("glass_jar", s)
+            reading = cell_model.probe_crush_limit_reading("glass_jar", s, sigma=sigma)
+            devs.append(abs(reading - true_limit) / true_limit)
+        return sum(devs) / len(devs)
+
+    assert _mean_abs_dev(0.30) > _mean_abs_dev(0.03)
+
+
+def test_probe_reading_independent_of_other_rng_streams():
+    """Adding/sweeping the probe must not perturb placement, friction, or
+    the crush-limit jitter for any seed -- own independent SeedSequence
+    salt, per its docstring."""
+    for seed in range(5):
+        rng_before = np.random.default_rng(seed)
+        xy_before = rng_before.uniform(-PLACEMENT_JITTER_M, PLACEMENT_JITTER_M, size=2).copy()
+        mu_before = sample_friction("glass_jar", rng_before)
+        crush_before = cell_model.jittered_crush_limit_n("glass_jar", seed)
+
+        for sigma in (0.0, 0.01, 0.03, 0.05, 0.10, 0.30):
+            cell_model.probe_crush_limit_reading("glass_jar", seed, sigma=sigma)
+
+        rng_after = np.random.default_rng(seed)
+        xy_after = rng_after.uniform(-PLACEMENT_JITTER_M, PLACEMENT_JITTER_M, size=2)
+        mu_after = sample_friction("glass_jar", rng_after)
+        crush_after = cell_model.jittered_crush_limit_n("glass_jar", seed)
+
+        assert (xy_before == xy_after).all()
+        assert mu_before == mu_after
+        assert crush_before == crush_after
+
+
+def test_run_trial_conditional_grip_realizes_fraction_times_probe():
+    """End-to-end wiring check: run_trial's realized grip_force_n for a
+    "grip_fraction" controller equals grip_fraction * this seed's probe
+    reading exactly."""
+    for seed in (5000, 5001, 5002):
+        grip_fraction = 0.9
+        result = run_trial("glass_jar", {"grip_fraction": grip_fraction, "carry_accel_ms2": 1.0}, seed)
+        expected = grip_fraction * cell_model.probe_crush_limit_reading("glass_jar", seed)
+        assert abs(result.controller["grip_force_n"] - expected) < 1e-9
+
+
+def test_run_trial_conditional_respects_probe_sigma_override():
+    seed = 5000
+    r_default = run_trial("glass_jar", {"grip_fraction": 0.9, "carry_accel_ms2": 1.0}, seed)
+    r_zero_sigma = run_trial(
+        "glass_jar", {"grip_fraction": 0.9, "carry_accel_ms2": 1.0, "probe_sigma": 0.0}, seed
+    )
+    true_limit = cell_model.jittered_crush_limit_n("glass_jar", seed)
+    assert abs(r_zero_sigma.controller["grip_force_n"] - 0.9 * true_limit) < 1e-9
+    # Default PROBE_SIGMA=0.03 means these should differ (overwhelmingly likely, not guaranteed,
+    # but true for this specific fixed seed -- deterministic, so this is a real assertion not a flake).
+    assert r_default.controller["grip_force_n"] != r_zero_sigma.controller["grip_force_n"]

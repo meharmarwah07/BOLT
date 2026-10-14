@@ -23,10 +23,12 @@ import numpy as np
 from cell_model import (
     OBJECT_CLASSES,
     PLACEMENT_JITTER_M,
+    PROBE_SIGMA,
     build_xml,
     hold_steps_for,
     jittered_crush_limit_n,
     motion_profile,
+    probe_crush_limit_reading,
     sample_friction,
 )
 
@@ -55,7 +57,19 @@ class TrialResult:
 
 
 def run_trial(object_class, params, seed):
-    grip_force_n = params["grip_force_n"]
+    # Two controller shapes: "grip_force_n" (fixed, the original Part A/B
+    # contract) or "grip_fraction" (conditional -- Phase B's probe-based
+    # rule type: grip = grip_fraction * a noisy pre-grasp reading of THIS
+    # seed's true crush limit, cell_model.probe_crush_limit_reading).
+    # Exactly one must be present; the realized grip_force_n is what
+    # actually gets commanded below either way, so everything downstream
+    # (crush check, lift/carry physics) is identical for both shapes.
+    if "grip_fraction" in params:
+        probe_sigma = params.get("probe_sigma", PROBE_SIGMA)
+        probe_reading = probe_crush_limit_reading(object_class, seed, sigma=probe_sigma)
+        grip_force_n = params["grip_fraction"] * probe_reading
+    else:
+        grip_force_n = params["grip_force_n"]
     carry_accel_ms2 = params["carry_accel_ms2"]
     obj_props = OBJECT_CLASSES[object_class]
 

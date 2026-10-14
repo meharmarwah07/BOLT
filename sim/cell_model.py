@@ -65,6 +65,45 @@ def jittered_crush_limit_n(object_class, seed):
     return nominal * factor
 
 
+PROBE_SIGMA = 0.03  # normal sigma, as a fraction of THIS TRIAL's true (already-jittered) crush limit
+_PROBE_JITTER_SALT = 0x50524F42455F5245  # "PROBE_RE" read as hex digits, a different arbitrary fixed salt
+
+
+def probe_crush_limit_reading(object_class, seed, sigma=None):
+    """A noisy pre-grasp reading of THIS TRIAL's true crush limit -- e.g. a
+    compliance/tactile probe taken before the grip ramps up (Phase B's
+    conditional rule type: grip = grip_fraction * this reading). Modeled as
+    reading = true_limit * (1 + N(0, sigma)), true_limit being THIS seed's
+    own jittered_crush_limit_n(...) (the real per-part threshold, not the
+    nominal datasheet number) -- the probe estimates the part in front of
+    it, not some population average. `sigma` defaults to PROBE_SIGMA; a
+    caller may override it per call (dev_check.py sweeps it) without a
+    module-level mutation.
+
+    Unlike jittered_crush_limit_n, this is NOT clipped to a few standard
+    deviations -- a sensor reading has no physical reason to be bounded
+    the way a real material limit does, and letting the tail run free is
+    exactly what lets a large PROBE_SIGMA genuinely degrade a conditional
+    rule back toward blind guessing (see pipeline/dev_check.py's
+    PROBE_SIGMA sweep).
+
+    Deterministic given (object_class, seed, sigma); drawn from its OWN
+    independent RNG stream (a different SeedSequence salt than both the
+    trial's own placement/friction rng AND jittered_crush_limit_n's own
+    salt), so adding/sweeping this probe never perturbs either of those --
+    every existing seed's placement, friction, and crush-limit jitter are
+    bit-for-bit unchanged.
+    """
+    if sigma is None:
+        sigma = PROBE_SIGMA
+    true_limit = jittered_crush_limit_n(object_class, seed)
+    if sigma == 0.0:
+        return true_limit
+    rng = np.random.default_rng(np.random.SeedSequence([seed, _PROBE_JITTER_SALT]))
+    noise = float(rng.normal(0.0, sigma))
+    return true_limit * (1.0 + noise)
+
+
 def sample_friction(object_class, rng):
     lo, hi = OBJECT_CLASSES[object_class]["friction_range"]
     return float(rng.uniform(lo, hi))
