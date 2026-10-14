@@ -62,6 +62,26 @@ MAX_NEWLY_BROKEN = 0  # team default: zero tolerance for regressing a previously
 # Configurable per call: pass a different `train_seeds` to check1().
 DEFAULT_TRAIN_SEEDS = range(100)
 
+# ---- Check 1 v2 ---------------------------------------------------------
+# pre-registered v2, written before any 3000+ run.
+#
+# v1's gate (above) was found too weak after seeing held-out 2000-2199: it
+# only required the Wilson 95% LOWER bound of (seeds_fixed / baseline_drops)
+# to clear 0.5, which says nothing about the rule's own absolute after-rule
+# drop rate -- a rule with ~28% drop rate still passed. v2 replaces that
+# fixed-rate gate with a direct ceiling on the after-rule drop rate's Wilson
+# UPPER bound, plus a cap on the slowdown proxy. MAX_CRUSH_COUNT,
+# MAX_NEWLY_BROKEN, and the other-classes-unchanged check are unchanged
+# from v1.
+#
+# CHECK1_VERSION picks the gate check1() uses when the caller doesn't pass
+# its own `version`. Set to 2 (v2 is now the default); pass version=1 to
+# any check1() call to recover the old gate -- v1's code path is kept,
+# not deleted.
+CHECK1_VERSION = 2
+MAX_AFTER_DROP_RATE_CI95_UPPER = 0.10  # Wilson 95% upper bound of drop_rate_after must be <= this.
+MAX_SLOWDOWN_PROXY = 1.5  # after/before carry-phase duration ratio must be <= this.
+
 # "Without the rule" baseline controller settings -- the nominal, untuned
 # setting a rule is supposed to fix glass_jar at, without touching the
 # other two classes.
@@ -114,13 +134,73 @@ class Check1Outcome:
     margin: Optional[float] = None  # 1 - grip_force_min_n / crush_limit
     slowdown_proxy: Optional[float] = None  # carry-phase duration ratio, after/before
     n_trials: int = 0
+    version: int = 1  # which CHECK1_VERSION gate produced this outcome
+    intervention_cost_grip: Optional[float] = None  # |after.grip - nominal.grip| / nominal.grip
+    intervention_cost_accel: Optional[float] = None  # |after.accel - nominal.accel| / nominal.accel
 
 
 def _failed(reasons, record=None) -> Check1Outcome:
     return Check1Outcome(passed=False, reasons=reasons, record=record)
 
 
-def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Optional[BatchSummary] = None) -> Check1Outcome:
+def _v1_primary_gate(seeds_fixed, n_baseline_drops, fixed_rate_ci95):
+    """v1's own gate: Wilson 95% CI lower bound of fixed/baseline_drops >= MIN_FIXED_RATE_CI95_LOWER.
+    Pure function of already-computed summary numbers -- no sim call -- so it's directly unit-testable.
+    """
+    if n_baseline_drops == 0:
+        return False, ["baseline has zero drops for this class/seeds -- nothing to fix, cannot assess fixed rate"]
+    fix_fraction = len(seeds_fixed) / n_baseline_drops
+    if fixed_rate_ci95[0] < MIN_FIXED_RATE_CI95_LOWER:
+        return False, [
+            f"fixed {len(seeds_fixed)}/{n_baseline_drops} baseline drops ({fix_fraction:.0%} point "
+            f"estimate), but the Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} is below the "
+            f"required {MIN_FIXED_RATE_CI95_LOWER}"
+        ]
+    return True, []
+
+
+def _v2_primary_gate(drop_rate_after, n_drop_after, n_trials_after, drop_rate_after_ci95, slowdown_proxy):
+    """v2's own gate: Wilson 95% CI upper bound of the after-rule drop rate <= MAX_AFTER_DROP_RATE_CI95_UPPER,
+    and slowdown_proxy <= MAX_SLOWDOWN_PROXY. Pure function of already-computed summary numbers -- no sim
+    call -- so it's directly unit-testable.
+    """
+    reasons = []
+    ok = True
+    if drop_rate_after_ci95[1] > MAX_AFTER_DROP_RATE_CI95_UPPER:
+        reasons.append(
+            f"after-rule drop rate {drop_rate_after:.3f} ({n_drop_after}/{n_trials_after}), Wilson 95% CI "
+            f"upper bound {drop_rate_after_ci95[1]:.3f} exceeds the required <= {MAX_AFTER_DROP_RATE_CI95_UPPER}"
+        )
+        ok = False
+    if slowdown_proxy > MAX_SLOWDOWN_PROXY:
+        reasons.append(f"slowdown_proxy {slowdown_proxy:.3f} exceeds the required <= {MAX_SLOWDOWN_PROXY}")
+        ok = False
+    return ok, reasons
+
+
+def _common_gates(crush_count_after, seeds_newly_broken, other_classes_unchanged):
+    """Gates shared by v1 and v2, unchanged between the two versions."""
+    reasons = []
+    ok = True
+    if crush_count_after > MAX_CRUSH_COUNT:
+        reasons.append(f"{crush_count_after} crush(es) after the rule (must be <= {MAX_CRUSH_COUNT})")
+        ok = False
+    if len(seeds_newly_broken) > MAX_NEWLY_BROKEN:
+        reasons.append(f"{len(seeds_newly_broken)} previously-ok seed(s) newly broken: {seeds_newly_broken}")
+        ok = False
+    if not other_classes_unchanged:
+        reasons.append("apply()/replay changed results for a non-target object class")
+        ok = False
+    return ok, reasons
+
+
+def check1(
+    rule,
+    train_seeds=None,
+    parallel: bool = True,
+    precomputed_before: Optional[BatchSummary] = None,
+    version: Optional[int] = None,
+) -> Check1Outcome:
     """Replay `rule` on `train_seeds` (default DEFAULT_TRAIN_SEEDS, i.e.
     seeds 0-99 -- pass a different range/list to use fewer, e.g. for a
     fast test) and judge PASS/FAIL.
@@ -129,9 +209,17 @@ def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Op
     candidate rules for the same object_class back to back) reuse one
     already-run baseline batch instead of re-running the identical
     BASELINE_PARAMS replay for every candidate.
+
+    `version` selects the gate: 1 for the original fixed-rate-lower-bound
+    gate, 2 for the v2 gate (see the "Check 1 v2" block above). Defaults to
+    CHECK1_VERSION.
     """
     if train_seeds is None:
         train_seeds = DEFAULT_TRAIN_SEEDS
+    if version is None:
+        version = CHECK1_VERSION
+    if version not in (1, 2):
+        raise ValueError(f"unknown check1 version {version!r}; must be 1 or 2")
 
     val = validate(rule)
     if not val.ok:
@@ -184,42 +272,40 @@ def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Op
     after_duration = phase_duration(CARRY_DISTANCE_M, after_params["carry_accel_ms2"])
     slowdown_proxy = after_duration / before_duration
 
-    reasons = []
-    ok = True
+    drop_rate_after_ci95 = llm_stats.wilson(after.n_drop, after.n_trials)
+
+    intervention_cost_grip = abs(after_params["grip_force_n"] - before_params["grip_force_n"]) / before_params["grip_force_n"]
+    intervention_cost_accel = abs(after_params["carry_accel_ms2"] - before_params["carry_accel_ms2"]) / before_params["carry_accel_ms2"]
 
     n_baseline_drops = before.n_drop
-    fixed_rate_ci95 = None
-    if n_baseline_drops == 0:
-        reasons.append("baseline has zero drops for this class/seeds -- nothing to fix, cannot assess fixed rate")
-        ok = False
+    fixed_rate_ci95 = llm_stats.wilson(len(seeds_fixed), n_baseline_drops) if n_baseline_drops > 0 else None
+
+    if version == 1:
+        primary_ok, primary_reasons = _v1_primary_gate(seeds_fixed, n_baseline_drops, fixed_rate_ci95)
     else:
-        fixed_rate_ci95 = llm_stats.wilson(len(seeds_fixed), n_baseline_drops)
-        fix_fraction = len(seeds_fixed) / n_baseline_drops
-        if fixed_rate_ci95[0] < MIN_FIXED_RATE_CI95_LOWER:
-            reasons.append(
-                f"fixed {len(seeds_fixed)}/{n_baseline_drops} baseline drops ({fix_fraction:.0%} point "
-                f"estimate), but the Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} is below the "
-                f"required {MIN_FIXED_RATE_CI95_LOWER}"
-            )
-            ok = False
+        primary_ok, primary_reasons = _v2_primary_gate(after.drop_rate, after.n_drop, after.n_trials, drop_rate_after_ci95, slowdown_proxy)
+    common_ok, common_reasons = _common_gates(crush_count_after, seeds_newly_broken, other_classes_unchanged)
 
-    if crush_count_after > MAX_CRUSH_COUNT:
-        reasons.append(f"{crush_count_after} crush(es) after the rule (must be <= {MAX_CRUSH_COUNT})")
-        ok = False
-
-    if len(seeds_newly_broken) > MAX_NEWLY_BROKEN:
-        reasons.append(f"{len(seeds_newly_broken)} previously-ok seed(s) newly broken: {seeds_newly_broken}")
-        ok = False
-
-    if not other_classes_unchanged:
-        reasons.append("apply()/replay changed results for a non-target object class")
-        ok = False
+    reasons = [
+        f"intervention cost: grip {intervention_cost_grip:+.1%} of nominal "
+        f"({before_params['grip_force_n']}N -> {after_params['grip_force_n']}N), accel "
+        f"{intervention_cost_accel:+.1%} of nominal "
+        f"({before_params['carry_accel_ms2']}m/s^2 -> {after_params['carry_accel_ms2']}m/s^2)"
+    ] + primary_reasons + common_reasons
+    ok = primary_ok and common_ok
 
     if ok:
-        reasons.append(
-            f"passed: validate ok, crush_count=0, newly_broken=0, fixed {len(seeds_fixed)}/{n_baseline_drops} "
-            f"(Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} >= {MIN_FIXED_RATE_CI95_LOWER})"
-        )
+        if version == 1:
+            reasons.append(
+                f"passed (v1): validate ok, crush_count=0, newly_broken=0, fixed {len(seeds_fixed)}/{n_baseline_drops} "
+                f"(Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} >= {MIN_FIXED_RATE_CI95_LOWER})"
+            )
+        else:
+            reasons.append(
+                f"passed (v2): validate ok, crush_count=0, newly_broken=0, drop_rate_after={after.drop_rate:.3f} "
+                f"(Wilson 95% CI upper bound {drop_rate_after_ci95[1]:.3f} <= {MAX_AFTER_DROP_RATE_CI95_UPPER}), "
+                f"slowdown_proxy={slowdown_proxy:.3f} <= {MAX_SLOWDOWN_PROXY}"
+            )
 
     record = Check1Record(
         target_class=target_class,
@@ -228,6 +314,8 @@ def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Op
         other_classes_unchanged=other_classes_unchanged,
         crush_count=crush_count_after,
         cited_report_ids=list(rule.source_report_ids),
+        intervention_cost_grip=intervention_cost_grip,
+        intervention_cost_accel=intervention_cost_accel,
     )
 
     return Check1Outcome(
@@ -237,7 +325,7 @@ def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Op
         drop_rate_before=before.drop_rate,
         drop_rate_after=after.drop_rate,
         drop_rate_before_ci95=llm_stats.wilson(before.n_drop, before.n_trials),
-        drop_rate_after_ci95=llm_stats.wilson(after.n_drop, after.n_trials),
+        drop_rate_after_ci95=drop_rate_after_ci95,
         seeds_fixed=seeds_fixed,
         seeds_newly_broken=seeds_newly_broken,
         fixed_rate_ci95=fixed_rate_ci95,
@@ -245,6 +333,9 @@ def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Op
         margin=margin,
         slowdown_proxy=slowdown_proxy,
         n_trials=before.n_trials,
+        version=version,
+        intervention_cost_grip=intervention_cost_grip,
+        intervention_cost_accel=intervention_cost_accel,
     )
 
 

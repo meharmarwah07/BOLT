@@ -181,7 +181,12 @@ def loop(
     candidates_per_round: int = CANDIDATES_PER_ROUND,
     min_interval_s: float = MIN_LLM_INTERVAL_S,
     max_concurrency: int = MAX_LLM_CONCURRENCY,
+    check1_version: Optional[int] = None,
 ) -> LoopResult:
+    """`check1_version` is forwarded to pipeline/check1.py's check1() as its
+    `version` arg; None (the default) means check1's own CHECK1_VERSION
+    default (currently 2). Pass 1 to recover the old v1 gate for this run.
+    """
     throttle = _Throttle(min_interval_s, max_concurrency)
     seen_rule_ids = set()
     attempts = []
@@ -232,7 +237,7 @@ def loop(
                 except lifecycle.LifecycleError as e:
                     rec.note = f"PROPOSED transition failed: {e}"
 
-            rec.check1 = check1_mod.check1(rec.rule, train_seeds)
+            rec.check1 = check1_mod.check1(rec.rule, train_seeds, version=check1_version)
 
             if rec.note is None:
                 try:
@@ -313,6 +318,8 @@ if __name__ == "__main__":
     ap.add_argument("--candidates-per-round", type=int, default=CANDIDATES_PER_ROUND)
     ap.add_argument("--min-interval-s", type=float, default=MIN_LLM_INTERVAL_S)
     ap.add_argument("--max-concurrency", type=int, default=MAX_LLM_CONCURRENCY)
+    ap.add_argument("--check1-version", type=int, default=None, choices=[1, 2],
+                     help="forwarded to check1()'s `version`; default: check1.py's own CHECK1_VERSION")
     args = ap.parse_args()
 
     RUNS_DIR = os.path.join(PIPELINE_DIR, "runs")
@@ -365,6 +372,7 @@ if __name__ == "__main__":
             failure_reports, range(args.check1_seeds), audit_path,
             max_rounds=args.max_rounds, candidates_per_round=args.candidates_per_round,
             min_interval_s=args.min_interval_s, max_concurrency=args.max_concurrency,
+            check1_version=args.check1_version,
         )
     finally:
         wall_time_s = time.monotonic() - t0

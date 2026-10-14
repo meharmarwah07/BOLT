@@ -33,6 +33,7 @@ for _p in (HERE, SIM_DIR, LLM_DIR):
 import check1 as check1_mod
 import evaluate_heldout as evaluate_heldout_mod
 import loop as loop_mod
+import stats as llm_stats_mod
 from rules import lifecycle
 from rules.schema import Rule
 import rules.limits as rules_limits
@@ -40,9 +41,22 @@ import rules.limits as rules_limits
 PORT = 8000
 TRAIN_SEEDS = range(30)
 # Measured safe for glass_jar by an earlier audit (sim/STATUS.md): mean
-# min holding grip for glass_jar is ~17-20N depending on accel, so 24N
-# at a low 1.0 m/s^2 accel clears it with margin, under the 25N crush limit.
-GOOD_GLASS_JAR = dict(grip_force_min_n=24.0, carry_accel_max_ms2=1.0)
+# min holding grip for glass_jar is ~17-20N depending on accel, so 20N
+# at a low 1.0 m/s^2 accel clears it with margin.
+#
+# Was 24.0N until sim/cell_model.py's CRUSH_LIMIT_JITTER was added: 24.0N
+# is close enough to glass_jar's nominal 25.0N crush limit that it
+# sometimes crushed once the limit jitters down (as low as 25.0*0.85 =
+# 21.25N, the clipped worst case). 20.0N stays safely under that floor for
+# every seed. This still clears Check 1 v1's Wilson-lower-bound gate
+# (measured ~66% fixed-rate point estimate on seeds 5000-5099, comfortably
+# above the 0.5 bound) but does NOT clear v2's absolute-drop-rate gate
+# (measured ~34% drop rate at grip=20 on the same seeds) -- per
+# pipeline/dev_check.py, no fixed (grip, accel) setting clears v2 for
+# glass_jar without also crushing a nonzero fraction of seeds. Tests below
+# that specifically exercise this "good" rule pin version=1 explicitly for
+# that reason.
+GOOD_GLASS_JAR = dict(grip_force_min_n=20.0, carry_accel_max_ms2=1.0)
 
 
 def _port_open(port=PORT):
@@ -115,9 +129,16 @@ def _rule(**overrides):
 
 
 def test_good_rule_passes():
-    outcome = check1_mod.check1(_rule(**GOOD_GLASS_JAR), TRAIN_SEEDS)
+    # version=1 pinned: GOOD_GLASS_JAR clears v1's Wilson-lower-bound gate
+    # but not v2's absolute-drop-rate gate -- see GOOD_GLASS_JAR's comment.
+    # Uses 100 seeds, not the module's TRAIN_SEEDS=range(30): measured fixed
+    # fraction at grip=20 is ~63-70% but noisy enough at only 30 seeds that
+    # its Wilson lower bound doesn't reliably clear 0.5 (measured 0.455 at
+    # n=30, 0.474 at n=60) -- 100 seeds narrows the interval enough to
+    # clear it reliably, same n used by test_default_train_seeds_is_100.
+    outcome = check1_mod.check1(_rule(**GOOD_GLASS_JAR), range(100), version=1)
     if not outcome.passed:
-        return False, f"expected a clearly-good glass_jar rule to pass; reasons={outcome.reasons}"
+        return False, f"expected a clearly-good glass_jar rule to pass check1 v1; reasons={outcome.reasons}"
     if outcome.record.crush_count != 0:
         return False, f"expected crush_count 0, got {outcome.record.crush_count}"
     return True, ""
@@ -132,14 +153,15 @@ def test_grip_too_low_fails():
 
 def test_default_train_seeds_is_100():
     """check1() with no train_seeds argument uses DEFAULT_TRAIN_SEEDS
-    (0-99, 100 seeds) -- the spec's "100 train seeds by default"."""
+    (0-99, 100 seeds) -- the spec's "100 train seeds by default". version=1
+    pinned -- see GOOD_GLASS_JAR's comment (v1-passing, not v2-passing)."""
     if list(check1_mod.DEFAULT_TRAIN_SEEDS) != list(range(100)):
         return False, f"expected DEFAULT_TRAIN_SEEDS == range(100), got {check1_mod.DEFAULT_TRAIN_SEEDS}"
-    outcome = check1_mod.check1(_rule(**GOOD_GLASS_JAR))  # no train_seeds -- uses the default
+    outcome = check1_mod.check1(_rule(**GOOD_GLASS_JAR), version=1)  # no train_seeds -- uses the default
     if outcome.n_trials != 100:
         return False, f"expected 100 trials when train_seeds is omitted, got {outcome.n_trials}"
     if not outcome.passed:
-        return False, f"expected the good rule to still pass at 100 seeds; reasons={outcome.reasons}"
+        return False, f"expected the good rule to still pass v1 at 100 seeds; reasons={outcome.reasons}"
     return True, ""
 
 
@@ -150,9 +172,10 @@ def test_wilson_lower_bound_gates_pass_not_point_estimate():
     lower bound is 0.313, below MIN_FIXED_RATE_CI95_LOWER (0.5) -- so it
     must fail under the current rule. This is the real behavior change
     item 1 asked for, demonstrated with a real measured case rather than
-    asserted against a synthetic number.
+    asserted against a synthetic number. version=1 pinned: this test is
+    specifically about v1's own fixed-rate gate math, not v2's.
     """
-    outcome = check1_mod.check1(_rule(grip_force_min_n=17.0, carry_accel_max_ms2=1.0), range(10))
+    outcome = check1_mod.check1(_rule(grip_force_min_n=17.0, carry_accel_max_ms2=1.0), range(10), version=1)
     n_base = outcome.record.drops_before
     n_fixed = len(outcome.seeds_fixed)
     if n_base == 0:
@@ -240,7 +263,7 @@ def test_heldout_refuses_without_rule_json():
     return True, ""
 
 
-def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=24.0, accel=1.0):
+def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=20.0, accel=1.0):
     """Hand-builds a CHECK1_PASSED rule + matching audit log + accepted_rule.json
     (the same wrapper shape loop.py writes), so evaluate_heldout.py tests don't
     need to run the full loop()/fake_server dance just to get a starting point."""
@@ -253,7 +276,10 @@ def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=24.
     if os.path.exists(audit_path):
         os.remove(audit_path)
     lifecycle.transition(audit_path, rule.rule_id, lifecycle.State.PROPOSED, "test")
-    outcome = check1_mod.check1(rule, range(30))
+    # version=1: default grip/accel (20.0/1.0) clears v1, not v2 -- see
+    # GOOD_GLASS_JAR's comment above. This helper needs a CHECK1_PASSED
+    # rule to seed the held-out demo flow, not to exercise v2's gate.
+    outcome = check1_mod.check1(rule, range(30), version=1)
     lifecycle.record_check1(audit_path, rule.rule_id, "test", outcome.passed, outcome.record)
     with open(rule_json_path, "w") as f:
         json.dump({
@@ -364,9 +390,20 @@ def _run_round1_insufficient_round2_strong():
         audit_path = os.path.join(HERE, "runs", "test_loop_round2_audit.jsonl")
         if os.path.exists(audit_path):
             os.remove(audit_path)
+        # check1_version=1: this helper is testing LOOP mechanics (round
+        # progression, feedback, lifecycle logging), not Check 1's gate
+        # version -- v2's math has its own direct unit tests in this file.
+        # 100 seeds (not the original 15): fake_server.py's "strong" reply
+        # (20N/1.0, lowered from 24N for CRUSH_LIMIT_JITTER safety -- see
+        # its own comment) fixes ~64% of baseline drops, whose Wilson 95%
+        # lower bound only clears v1's 0.5 bound reliably at ~100 seeds
+        # (measured 0.542 at n=100, 0.455 at n=30, 0.392-ish smaller still)
+        # -- too few seeds made this flaky after the rule got less
+        # aggressive.
         result = loop_mod.loop(
-            failure_reports, range(15), audit_path,
+            failure_reports, range(100), audit_path,
             max_rounds=3, candidates_per_round=3, min_interval_s=0.0,
+            check1_version=1,
         )
         server_log = _fetch_log()
         return result, audit_path, server_log
@@ -551,6 +588,142 @@ def test_mutation_crush_check_catches_regression():
         rules_limits.CRUSH_LIMIT_N["glass_jar"] = original_crush
 
 
+def test_check1_version_defaults_to_2():
+    if check1_mod.CHECK1_VERSION != 2:
+        return False, f"expected CHECK1_VERSION == 2, got {check1_mod.CHECK1_VERSION}"
+    rule = _rule(grip_force_min_n=6.0, carry_accel_max_ms2=6.0, object_class="steel")
+    outcome = check1_mod.check1(rule, range(50))  # no version arg -- must use the default
+    if outcome.version != 2:
+        return False, f"expected outcome.version == 2 by default, got {outcome.version}"
+    return True, ""
+
+
+def test_v2_gate_pure_passes_good_numbers():
+    """Direct unit test of check1_mod._v2_primary_gate (no sim call): a
+    rule with a low after-rule drop rate and no slowdown passes."""
+    ci95 = llm_stats_mod.wilson(0, 100)
+    ok, reasons = check1_mod._v2_primary_gate(0.0, 0, 100, ci95, slowdown_proxy=1.0)
+    if not ok:
+        return False, f"expected this to pass v2's primary gate; reasons={reasons}"
+    if reasons:
+        return False, f"expected no failure reasons on a pass, got {reasons}"
+    return True, ""
+
+
+def test_v2_gate_pure_fails_30pct_drop_rule():
+    """A rule with a measured 30% after-rule drop rate (30/100, as named in
+    the task) must fail v2's absolute-drop-rate gate."""
+    ci95 = llm_stats_mod.wilson(30, 100)
+    ok, reasons = check1_mod._v2_primary_gate(0.30, 30, 100, ci95, slowdown_proxy=1.0)
+    if ok:
+        return False, "expected a 30%-drop rule to fail v2's gate"
+    if not any("drop rate" in r for r in reasons):
+        return False, f"expected a drop-rate failure reason, got {reasons}"
+    return True, ""
+
+
+def test_v2_gate_pure_fails_slow_rule():
+    """A rule with a low drop rate but slowdown_proxy > MAX_SLOWDOWN_PROXY
+    must fail v2's gate on slowdown alone.
+
+    Exercised directly against _v2_primary_gate rather than through a real
+    apply()/check1() rule: MAX_SLOWDOWN_PROXY=1.5 is actually unreachable
+    via any rule apply() can legally produce -- the lowest legal accel is
+    CARRY_ACCEL_MIN_MS2=0.5 (rules/limits.py), and slowdown_proxy there
+    tops out at sqrt(1.0/0.5) ~= 1.414 < 1.5 (see phase_duration's inverse-
+    sqrt shape in sim/cell_model.py). Flagged as a finding in the task
+    report: this gate is effectively inert for any currently-legal rule.
+    """
+    ci95 = llm_stats_mod.wilson(0, 100)
+    ok, reasons = check1_mod._v2_primary_gate(0.0, 0, 100, ci95, slowdown_proxy=2.0)
+    if ok:
+        return False, "expected a slowdown_proxy=2.0 rule to fail v2's gate"
+    if not any("slowdown_proxy" in r for r in reasons):
+        return False, f"expected a slowdown failure reason, got {reasons}"
+    return True, ""
+
+
+def test_v2_gate_pure_fails_on_crush():
+    """Direct unit test of check1_mod._common_gates (shared by v1/v2): any
+    crush must fail regardless of version."""
+    ok, reasons = check1_mod._common_gates(crush_count_after=1, seeds_newly_broken=[], other_classes_unchanged=True)
+    if ok:
+        return False, "expected a nonzero crush_count to fail _common_gates"
+    if not any("crush(es)" in r for r in reasons):
+        return False, f"expected a crush-count failure reason, got {reasons}"
+    return True, ""
+
+
+def test_v2_gate_integration_passes_real_sim():
+    """End-to-end (real sim, not hand-simulated): a benign steel rule --
+    baseline already holds 0/100 at grip=5N, so this rule changes nothing
+    -- clears v2 cleanly through the full check1() pipeline."""
+    rule = _rule(rule_id="r_v2_good_steel", object_class="steel", grip_force_min_n=6.0, carry_accel_max_ms2=6.0)
+    outcome = check1_mod.check1(rule, range(100))  # default version == 2
+    if not outcome.passed:
+        return False, f"expected this steel rule to pass v2; reasons={outcome.reasons}"
+    if outcome.crush_count_after != 0:
+        return False, f"expected crush_count 0, got {outcome.crush_count_after}"
+    return True, ""
+
+
+def test_v2_rejects_a_rule_that_v1_would_accept():
+    """The core behavior change: GOOD_GLASS_JAR clears v1 (Wilson lower
+    bound of fixed-rate >= 0.5) but its absolute after-rule drop rate
+    (~34% measured) is nowhere near v2's <= 0.10 ceiling -- this is
+    exactly the "~28% drop rate still passed v1" gap the held-out run
+    (seeds 2000-2199) found, reproduced here on train seeds instead.
+    """
+    rule = _rule(**GOOD_GLASS_JAR)
+    v1_outcome = check1_mod.check1(rule, range(100), version=1)
+    v2_outcome = check1_mod.check1(rule, range(100), version=2)
+    if not v1_outcome.passed:
+        return False, f"expected GOOD_GLASS_JAR to pass v1; reasons={v1_outcome.reasons}"
+    if v2_outcome.passed:
+        return False, f"expected GOOD_GLASS_JAR to fail v2; reasons={v2_outcome.reasons}"
+    if not any("drop rate" in r for r in v2_outcome.reasons):
+        return False, f"expected v2's failure reason to cite the absolute drop rate; got {v2_outcome.reasons}"
+    return True, ""
+
+
+def test_check1_version_selectable_v1():
+    """v1 is not deleted -- version=1 recovers the old gate and old
+    reasons text, with its own outcome.version tag."""
+    rule = _rule(**GOOD_GLASS_JAR)
+    outcome = check1_mod.check1(rule, range(100), version=1)
+    if outcome.version != 1:
+        return False, f"expected outcome.version == 1, got {outcome.version}"
+    if not any("(v1)" in r for r in outcome.reasons):
+        return False, f"expected a '(v1)' tagged pass reason, got {outcome.reasons}"
+    return True, ""
+
+
+def test_check1_unknown_version_raises():
+    rule = _rule(**GOOD_GLASS_JAR)
+    try:
+        check1_mod.check1(rule, range(5), version=3)
+    except ValueError:
+        return True, ""
+    return False, "expected check1(..., version=3) to raise ValueError"
+
+
+def test_intervention_cost_reported():
+    """|after - nominal| / nominal for grip and accel, reported on both
+    Check1Outcome and the real rules.lifecycle.Check1Record."""
+    rule = _rule(rule_id="r_intervention_cost", object_class="steel", grip_force_min_n=6.0, carry_accel_max_ms2=6.0)
+    outcome = check1_mod.check1(rule, range(30))
+    expected_grip_cost = abs(6.0 - check1_mod.BASELINE_PARAMS["grip_force_n"]) / check1_mod.BASELINE_PARAMS["grip_force_n"]
+    if abs(outcome.intervention_cost_grip - expected_grip_cost) > 1e-9:
+        return False, f"expected intervention_cost_grip={expected_grip_cost}, got {outcome.intervention_cost_grip}"
+    if outcome.intervention_cost_accel != 0.0:
+        return False, f"expected intervention_cost_accel=0.0 (accel unchanged), got {outcome.intervention_cost_accel}"
+    if outcome.record.intervention_cost_grip != outcome.intervention_cost_grip:
+        return False, "expected Check1Record.intervention_cost_grip to match Check1Outcome's"
+    if not any("intervention cost" in r for r in outcome.reasons):
+        return False, f"expected an 'intervention cost' line in reasons, got {outcome.reasons}"
+    return True, ""
+
+
 UNIT_TESTS = [
     ("a clearly good glass_jar rule passes check1", test_good_rule_passes),
     ("grip too low fails check1", test_grip_too_low_fails),
@@ -570,6 +743,16 @@ UNIT_TESTS = [
     ("sim crush limits match rules.limits.CRUSH_LIMIT_N", test_sim_crush_limits_match_rules_limits),
     ("no API key in any pipeline output", test_no_api_key_in_loop_output),
     ("mutation: flipping the crush check must fail a test, then restore", test_mutation_crush_check_catches_regression),
+    ("CHECK1_VERSION defaults to 2", test_check1_version_defaults_to_2),
+    ("v2 gate (pure): passes good numbers", test_v2_gate_pure_passes_good_numbers),
+    ("v2 gate (pure): fails a 30%-drop rule", test_v2_gate_pure_fails_30pct_drop_rule),
+    ("v2 gate (pure): fails a slow rule", test_v2_gate_pure_fails_slow_rule),
+    ("v2 gate (pure): fails on crush", test_v2_gate_pure_fails_on_crush),
+    ("v2 gate (real sim): a good steel rule passes", test_v2_gate_integration_passes_real_sim),
+    ("v2 rejects a rule v1 would accept (the held-out finding, reproduced)", test_v2_rejects_a_rule_that_v1_would_accept),
+    ("check1 version is selectable: v1 still works", test_check1_version_selectable_v1),
+    ("check1 rejects an unknown version", test_check1_unknown_version_raises),
+    ("intervention cost is reported on Check1Outcome and Check1Record", test_intervention_cost_reported),
 ]
 
 

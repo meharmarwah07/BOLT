@@ -65,6 +65,11 @@ class Check1Record:
     other_classes_unchanged: bool
     crush_count: int
     cited_report_ids: list = field(default_factory=list)
+    # Added for Check 1 v2 (pipeline/check1.py): |after - nominal| / nominal
+    # for grip and accel. Optional/defaulted so existing (pre-v2) callers
+    # and already-logged audit entries are unaffected.
+    intervention_cost_grip: "float | None" = None
+    intervention_cost_accel: "float | None" = None
 
 
 def current_state(path, rule_id: str) -> State | None:

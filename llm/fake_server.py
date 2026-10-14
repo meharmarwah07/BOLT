@@ -19,8 +19,14 @@ FAKE_SCRIPT step dict keys (all optional):
                   (default "good"). "good" is a well-formed but physically
                   insufficient glass_jar rule (14N/2.5 m/s^2 -- measured
                   insufficient for most glass_jar seeds, sim/STATUS.md).
-                  "strong" is a well-formed AND sufficient one (24N/1.0
-                  m/s^2, measured safe). A script like
+                  "strong" is a well-formed one that is measured sufficient
+                  to clear Check 1 v1 (20N/1.0 m/s^2 -- see
+                  pipeline/check1.py's check1(..., version=1); it does NOT
+                  clear v2's tighter absolute-drop-rate gate, since no
+                  single (grip, accel) pair for glass_jar does without also
+                  crushing some fraction of seeds under
+                  sim/cell_model.py's CRUSH_LIMIT_JITTER -- see
+                  pipeline/dev_check.py). A script like
                   [{"content":"good"}, {"content":"strong"}] lets a test
                   simulate round 1 proposing something too weak and round 2
                   (the request after feedback) proposing something that
@@ -66,10 +72,14 @@ def _good_reply(source_ids, rule_id):
 
 
 def _strong_reply(source_ids, rule_id):
-    # Well-formed AND measured sufficient (sim/tests/test_sim.py's own
-    # verified-good value): fixes most glass_jar seeds at this grip/accel.
+    # Well-formed and measured sufficient to clear Check 1 v1 (fixes most
+    # glass_jar seeds, Wilson 95% CI lower bound of fixed-rate >= 0.5).
+    # Previously 24.0N; lowered to 20.0N after sim/cell_model.py's
+    # CRUSH_LIMIT_JITTER was added (glass_jar's crush_limit_n is nominally
+    # 25.0N but can jitter as low as 25.0*0.85=21.25N -- 24.0N sometimes
+    # crushed, 20.0N never does). Does not clear v2 (see module docstring).
     return json.dumps({
-        "rule_id": rule_id, "object_class": "glass_jar", "grip_force_min_n": 24.0,
+        "rule_id": rule_id, "object_class": "glass_jar", "grip_force_min_n": 20.0,
         "carry_accel_max_ms2": 1.0, "rationale": "stronger grip, slower carry", "source_report_ids": source_ids,
     })
 
