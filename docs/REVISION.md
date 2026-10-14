@@ -15,3 +15,4 @@ Not disclosed to the model: the friction range, the crush-jitter distribution.
 
 Arms (same protocol, 5 runs each on train seeds 0-4 reports / Check 1 train seeds): A = DeepSeek-V4-Flash; B = Gemma via Token Factory if available. All runs reported, including no-rule runs and infrastructure errors.
 Availability check (15 Oct, before any revised run): the endpoint's /models lists Gemma-4-31B-IT, so arm B uses that exact name.
+Note: commit 0139afa's message says FINAL_PROTOCOL.md was truncated by a paste error. That was a mistaken diagnosis; the file in b993ee7 was already complete and 0139afa only added the availability line above. No revised run or 3000+ measurement had happened at either commit.
