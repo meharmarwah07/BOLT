@@ -15,11 +15,28 @@ FAKE_SCRIPT step dict keys (all optional):
   status          HTTP status to send (default 200)
   retry_after     if status == 429, send this value as the Retry-After header
   finish_reason   "stop" or "length" (default "stop")
-  content         "good" | "bad" | "truncated" | "unknown_source" | "mismatched_class"
-                  (default "good")
+  content         "good" | "strong" | "bad" | "truncated" | "unknown_source" | "mismatched_class"
+                  (default "good"). "good" is a well-formed but physically
+                  insufficient glass_jar rule (14N/2.5 m/s^2 -- measured
+                  insufficient for most glass_jar seeds, sim/STATUS.md).
+                  "strong" is a well-formed AND sufficient one (24N/1.0
+                  m/s^2, measured safe). A script like
+                  [{"content":"good"}, {"content":"strong"}] lets a test
+                  simulate round 1 proposing something too weak and round 2
+                  (the request after feedback) proposing something that
+                  actually passes.
   no_choices      true -> response body has "choices": [] (overrides content/finish_reason)
 
 Default (no env vars): request 1 is bad, request 2+ is good (tests retry).
+
+Every reply's rule_id is unique per request (f"r_fake_{request_count:04d}")
+-- a real model can also repeat an id across samples/rounds, but this stub
+should not do so by construction. source_report_ids/object_class are
+echoed from the real request even when the caller appended extra plain
+text after the JSON array (e.g. solver.solve's `feedback` argument): this
+server parses only the LEADING JSON value of the last user message
+(json.JSONDecoder.raw_decode), not the whole string, so trailing text
+after the array no longer breaks the echo.
 
 Every request (successful or not) is recorded; GET /__log__ returns
 {"count": N, "max_tokens": [...], "messages": [...], "reasoning_effort": [...]}
@@ -38,59 +55,83 @@ TRUNCATED_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_mi
 UNKNOWN_SOURCE_REPLY = '{"rule_id":"r_0001","object_class":"glass_jar","grip_force_min_n":14,"carry_accel_max_ms2":2.5,"rationale":"slip before drop","source_report_ids":["fr_9999"]}'
 
 
-def _good_reply(source_ids):
+def _good_reply(source_ids, rule_id):
+    # Well-formed but measured INSUFFICIENT for most glass_jar seeds
+    # (sim/STATUS.md: mean min holding grip ~17-20N). "good" historically
+    # meant "parses and validates", not "actually fixes the drop".
     return json.dumps({
-        "rule_id": "r_0001", "object_class": "glass_jar", "grip_force_min_n": 14,
+        "rule_id": rule_id, "object_class": "glass_jar", "grip_force_min_n": 14,
         "carry_accel_max_ms2": 2.5, "rationale": "slip before drop", "source_report_ids": source_ids,
     })
 
 
-def _bad_reply(source_ids):
+def _strong_reply(source_ids, rule_id):
+    # Well-formed AND measured sufficient (sim/tests/test_sim.py's own
+    # verified-good value): fixes most glass_jar seeds at this grip/accel.
     return json.dumps({
-        "rule_id": "r_0001", "object_class": "glass_jar", "grip_force_min_n": 14,
+        "rule_id": rule_id, "object_class": "glass_jar", "grip_force_min_n": 24.0,
+        "carry_accel_max_ms2": 1.0, "rationale": "stronger grip, slower carry", "source_report_ids": source_ids,
+    })
+
+
+def _bad_reply(source_ids, rule_id):
+    return json.dumps({
+        "rule_id": rule_id, "object_class": "glass_jar", "grip_force_min_n": 14,
         "carry_accel_max_ms2": 2.5, "rationale": "slip before drop", "source_report_ids": source_ids,
         "confidence": 0.9,
     })
+
+
+def _parse_leading_json(text):
+    """Parse only the LEADING JSON value of `text`, ignoring anything after
+    it. solver.solve's optional `feedback` argument appends plain text
+    after the JSON-encoded failure reports in the same user message, so a
+    plain json.loads() on the whole string would fail and silently lose
+    the real report ids/object_class."""
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text)
+        return value
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _last_user_message_content(req_body):
+    for msg in reversed(req_body.get("messages") or []):
+        if msg.get("role") == "user":
+            return msg.get("content", "")
+    return None
 
 
 def _extract_report_ids(req_body):
     """Pull report_id values out of the most recent user message, so the
     stub's "good"/"bad" replies echo back a source_report_ids the caller
     will actually recognize (real callers don't all use "fr_0001")."""
-    for msg in reversed(req_body.get("messages") or []):
-        if msg.get("role") != "user":
-            continue
-        try:
-            payload = json.loads(msg.get("content", ""))
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if isinstance(payload, list):
-            ids = [item["report_id"] for item in payload if isinstance(item, dict) and "report_id" in item]
-            return ids or None
+    content = _last_user_message_content(req_body)
+    if content is None:
         return None
+    payload = _parse_leading_json(content)
+    if isinstance(payload, list):
+        ids = [item["report_id"] for item in payload if isinstance(item, dict) and "report_id" in item]
+        return ids or None
     return None
 
 
 def _extract_object_class(req_body):
     """Pull the object_class of the first report in the most recent user
     message, so "mismatched_class" can echo back something different."""
-    for msg in reversed(req_body.get("messages") or []):
-        if msg.get("role") != "user":
-            continue
-        try:
-            payload = json.loads(msg.get("content", ""))
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-            return payload[0].get("object_class")
+    content = _last_user_message_content(req_body)
+    if content is None:
         return None
+    payload = _parse_leading_json(content)
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0].get("object_class")
     return None
 
 
-def _mismatched_class_reply(source_ids, real_class):
+def _mismatched_class_reply(source_ids, real_class, rule_id):
     wrong_class = "steel" if real_class != "steel" else "cardboard"
     return json.dumps({
-        "rule_id": "r_0001", "object_class": wrong_class, "grip_force_min_n": 14,
+        "rule_id": rule_id, "object_class": wrong_class, "grip_force_min_n": 14,
         "carry_accel_max_ms2": 2.5, "rationale": "slip before drop", "source_report_ids": source_ids,
     })
 
@@ -124,13 +165,14 @@ class Handler(BaseHTTPRequestHandler):
         })
         source_ids = _extract_report_ids(req_body) or ["fr_0001"]
         real_class = _extract_object_class(req_body) or "glass_jar"
+        rule_id = f"r_fake_{request_count:04d}"
 
         if SLEEP_S > 0:
             time.sleep(SLEEP_S)
 
         if SCRIPT is not None:
             step = SCRIPT[min(request_count - 1, len(SCRIPT) - 1)]
-            self._respond_scripted(step, source_ids, real_class)
+            self._respond_scripted(step, source_ids, real_class, rule_id)
             return
 
         if HTTP_STATUS != 200:
@@ -141,11 +183,11 @@ class Handler(BaseHTTPRequestHandler):
         if EMPTY_CONTENT:
             content = None
         elif ALWAYS_GOOD:
-            content = _good_reply(source_ids)
+            content = _good_reply(source_ids, rule_id)
         elif ALWAYS_BAD:
-            content = _bad_reply(source_ids)
+            content = _bad_reply(source_ids, rule_id)
         else:
-            content = _bad_reply(source_ids) if request_count == 1 else _good_reply(source_ids)
+            content = _bad_reply(source_ids, rule_id) if request_count == 1 else _good_reply(source_ids, rule_id)
 
         self._send_json(200, self._completion_body(content, "stop"))
 
@@ -161,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _respond_scripted(self, step, source_ids, real_class):
+    def _respond_scripted(self, step, source_ids, real_class, rule_id):
         status = step.get("status", 200)
         if status != 200:
             headers = None
@@ -174,15 +216,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         name = step.get("content", "good")
         if name == "good":
-            content = _good_reply(source_ids)
+            content = _good_reply(source_ids, rule_id)
+        elif name == "strong":
+            content = _strong_reply(source_ids, rule_id)
         elif name == "bad":
-            content = _bad_reply(source_ids)
+            content = _bad_reply(source_ids, rule_id)
         elif name == "truncated":
             content = TRUNCATED_REPLY
         elif name == "unknown_source":
             content = UNKNOWN_SOURCE_REPLY
         elif name == "mismatched_class":
-            content = _mismatched_class_reply(source_ids, real_class)
+            content = _mismatched_class_reply(source_ids, real_class, rule_id)
         else:
             raise ValueError(f"unknown FAKE_SCRIPT content name: {name!r}")
         finish_reason = step.get("finish_reason", "stop")

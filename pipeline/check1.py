@@ -1,0 +1,283 @@
+"""Check 1: simulation replay for a candidate Rule (CONTEXT.md section 4
+step 4 / section 8).
+
+check1(rule, train_seeds) replays the target object_class with and
+without the rule, via the real sim/run_trial.py + sim/batch.py (never
+hand-simulated), and judges PASS/FAIL against team-default thresholds
+fixed below. Returns a Check1Outcome: a pipeline-level report that wraps
+a REAL rules.lifecycle.Check1Record (not a hand-rolled substitute) plus
+the extra diagnostics CONTEXT.md section 8 asks for (Wilson intervals,
+paired fixed/newly-broken seeds, margin, slowdown) that Check1Record's
+own fixed shape has no room for.
+
+Does not touch rules/lifecycle.py's audit log itself -- that is
+pipeline/loop.py's job (it decides which attempts are worth logging).
+"""
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Optional
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SIM_DIR = os.path.join(ROOT, "sim")
+LLM_DIR = os.path.join(ROOT, "llm")
+for _p in (SIM_DIR, LLM_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from batch import BatchSummary, run_batch  # sim/batch.py
+from cell_model import phase_duration  # sim/cell_model.py
+from run_trial import CARRY_DISTANCE_M  # sim/run_trial.py
+
+import stats as llm_stats  # llm/stats.py -- Wilson interval, per spec
+
+from rules.apply import RuleRejected, apply
+from rules.lifecycle import Check1Record
+from rules.limits import CRUSH_LIMIT_N, OBJECT_CLASSES
+from rules.validate import validate
+
+# ---- Team defaults (PASS/FAIL thresholds) -----------------------------
+# These are pre-registered: fixed here, before any held-out run, per
+# CONTEXT.md section 8's own methodology ("held-out seeds used only for
+# the final measurement"). Changing them after looking at a held-out
+# result would defeat the point of having a held-out set at all.
+#
+# MIN_FIXED_RATE_CI95_LOWER is checked against the Wilson 95% LOWER bound
+# of (seeds_fixed / baseline_drops), not the raw point estimate -- a rule
+# that fixes, say, 6/10 baseline drops (60% point estimate) has a wide,
+# low-confidence interval at n=10 (Wilson 95%: ~0.31-0.85) and should not
+# pass as confidently as one that fixes 60/100 (Wilson 95%: ~0.50-0.69).
+# Requiring the LOWER bound to clear 0.5 means check1 only passes a rule
+# once there is 95% confidence the true fixed-rate is at least 50%, which
+# also makes DEFAULT_TRAIN_SEEDS' size (below) matter: more seeds narrow
+# the interval and make a real 50%+ rule easier to confidently clear.
+MIN_FIXED_RATE_CI95_LOWER = 0.5  # team default: 95% confident fixed-rate >= 50%.
+MAX_CRUSH_COUNT = 0  # team default: zero tolerance for crushing the part.
+MAX_NEWLY_BROKEN = 0  # team default: zero tolerance for regressing a previously-ok seed.
+
+# Default number of TRAIN seeds check1() replays on, if the caller doesn't
+# pass its own. 100 (seeds 0-99) was chosen so MIN_FIXED_RATE_CI95_LOWER's
+# Wilson interval is narrow enough to be a meaningful gate (see above) --
+# never the held-out range (sim/batch.py's HELD_OUT_SEEDS = 1000-1199).
+# Configurable per call: pass a different `train_seeds` to check1().
+DEFAULT_TRAIN_SEEDS = range(100)
+
+# "Without the rule" baseline controller settings -- the nominal, untuned
+# setting a rule is supposed to fix glass_jar at, without touching the
+# other two classes.
+#
+# sim/ has exactly one thing labeled "nominal": sim/tests/test_sim.py's
+# test_glass_jar_drops_at_nominal_grip_and_is_fixed_within_range uses
+# grip_force_n=2.0, carry_accel_ms2=1.0 (also monitor.py's/run_trial.py's
+# own CLI defaults). Checked first, as instructed, but measured on
+# TRAIN_SEEDS 0-99 (this pipeline's own run, not in sim/) it does NOT hold
+# for the other two classes: steel drops 100% (n=100) and cardboard drops
+# 29% (n=100) at that setting -- only glass_jar's own single-seed check in
+# test_sim.py was ever verified, not a 100-seed sweep, and not cross-class.
+# That setting is "nominal" in the sense of "a round number someone
+# tried", not "the setting at which only glass_jar is broken", which is
+# what check1's baseline needs to mean for its before/after comparison
+# and the "other classes unchanged" regression check to tell a true story.
+#
+# Chosen instead (measured on TRAIN_SEEDS 0-99, this pipeline, before any
+# held-out run): grip_force_n=5.0 N, carry_accel_ms2=1.0 m/s^2.
+#   steel:      0/100 drop  (5.0N clears sim/STATUS.md's measured mean
+#               min holding grip of ~3.8-4.2N with margin)
+#   cardboard:  0/100 drop  (5.0N clears its measured mean min holding
+#               grip of ~1.9-2.2N with a lot of margin)
+#   glass_jar: 100/100 drop (5.0N is far below its measured mean min
+#               holding grip of ~17-20N)
+# A clean split: steel and cardboard always hold, glass_jar always drops.
+# Fixed here, before any held-out run; never re-measured against or tuned
+# on HELD_OUT_SEEDS (1000+).
+BASELINE_PARAMS = {"grip_force_n": 5.0, "carry_accel_ms2": 1.0}
+NOMINAL_PARAMS = BASELINE_PARAMS  # alias: this IS "the nominal setting" referred to elsewhere (loop.py, evaluate_heldout.py)
+
+
+def _class_value(object_class) -> str:
+    return object_class.value if hasattr(object_class, "value") else object_class
+
+
+@dataclass
+class Check1Outcome:
+    passed: bool
+    reasons: list = field(default_factory=list)
+    record: Optional[Check1Record] = None  # the REAL rules.lifecycle.Check1Record
+    drop_rate_before: float = 0.0
+    drop_rate_after: float = 0.0
+    drop_rate_before_ci95: tuple = (0.0, 0.0)
+    drop_rate_after_ci95: tuple = (0.0, 0.0)
+    seeds_fixed: list = field(default_factory=list)
+    seeds_newly_broken: list = field(default_factory=list)
+    fixed_rate_ci95: Optional[tuple] = None  # Wilson 95% CI of fixed/baseline_drops; see MIN_FIXED_RATE_CI95_LOWER
+    crush_count_after: int = 0
+    margin: Optional[float] = None  # 1 - grip_force_min_n / crush_limit
+    slowdown_proxy: Optional[float] = None  # carry-phase duration ratio, after/before
+    n_trials: int = 0
+
+
+def _failed(reasons, record=None) -> Check1Outcome:
+    return Check1Outcome(passed=False, reasons=reasons, record=record)
+
+
+def check1(rule, train_seeds=None, parallel: bool = True, precomputed_before: Optional[BatchSummary] = None) -> Check1Outcome:
+    """Replay `rule` on `train_seeds` (default DEFAULT_TRAIN_SEEDS, i.e.
+    seeds 0-99 -- pass a different range/list to use fewer, e.g. for a
+    fast test) and judge PASS/FAIL.
+
+    `precomputed_before` lets a caller (e.g. a grid search trying many
+    candidate rules for the same object_class back to back) reuse one
+    already-run baseline batch instead of re-running the identical
+    BASELINE_PARAMS replay for every candidate.
+    """
+    if train_seeds is None:
+        train_seeds = DEFAULT_TRAIN_SEEDS
+
+    val = validate(rule)
+    if not val.ok:
+        return _failed([f"rules.validate failed: {val.error_text}"])
+
+    target_class = _class_value(rule.object_class)
+    before_params = dict(BASELINE_PARAMS)
+    try:
+        after_params = apply(rule, before_params, target_class)
+    except RuleRejected as e:
+        return _failed([f"apply() rejected the rule: {e}"])
+
+    before = precomputed_before
+    if before is None or before.object_class != target_class or before.controller != before_params:
+        before = run_batch(target_class, before_params, train_seeds, parallel=parallel)
+    after = run_batch(target_class, after_params, train_seeds, parallel=parallel)
+
+    before_by_seed = {r.seed: r.outcome for r in before.results}
+    after_by_seed = {r.seed: r.outcome for r in after.results}
+    seeds_fixed = sorted(
+        s for s, o in before_by_seed.items() if o == "drop" and after_by_seed.get(s) == "ok"
+    )
+    seeds_newly_broken = sorted(
+        s for s, o in before_by_seed.items() if o == "ok" and after_by_seed.get(s) in ("drop", "crush")
+    )
+    crush_count_after = after.n_crush
+
+    # Regression check on the OTHER two classes (CONTEXT.md section 8 item
+    # 2: a rule must not "regress another class"). apply() is defined to
+    # be a no-op whenever rule.object_class doesn't match, so this is a
+    # live, empirical confirmation of that guarantee via the real sim,
+    # not a re-statement of it.
+    other_classes_unchanged = True
+    for other_class in OBJECT_CLASSES:
+        if other_class == target_class:
+            continue
+        other_after_params = apply(rule, before_params, other_class)
+        if other_after_params != before_params:
+            other_classes_unchanged = False
+            continue
+        other_before = run_batch(other_class, before_params, train_seeds, parallel=parallel)
+        other_after = run_batch(other_class, other_after_params, train_seeds, parallel=parallel)
+        if [r.as_dict() for r in other_before.results] != [r.as_dict() for r in other_after.results]:
+            other_classes_unchanged = False
+
+    crush_limit = CRUSH_LIMIT_N[target_class]
+    margin = 1.0 - rule.grip_force_min_n / crush_limit
+
+    before_duration = phase_duration(CARRY_DISTANCE_M, before_params["carry_accel_ms2"])
+    after_duration = phase_duration(CARRY_DISTANCE_M, after_params["carry_accel_ms2"])
+    slowdown_proxy = after_duration / before_duration
+
+    reasons = []
+    ok = True
+
+    n_baseline_drops = before.n_drop
+    fixed_rate_ci95 = None
+    if n_baseline_drops == 0:
+        reasons.append("baseline has zero drops for this class/seeds -- nothing to fix, cannot assess fixed rate")
+        ok = False
+    else:
+        fixed_rate_ci95 = llm_stats.wilson(len(seeds_fixed), n_baseline_drops)
+        fix_fraction = len(seeds_fixed) / n_baseline_drops
+        if fixed_rate_ci95[0] < MIN_FIXED_RATE_CI95_LOWER:
+            reasons.append(
+                f"fixed {len(seeds_fixed)}/{n_baseline_drops} baseline drops ({fix_fraction:.0%} point "
+                f"estimate), but the Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} is below the "
+                f"required {MIN_FIXED_RATE_CI95_LOWER}"
+            )
+            ok = False
+
+    if crush_count_after > MAX_CRUSH_COUNT:
+        reasons.append(f"{crush_count_after} crush(es) after the rule (must be <= {MAX_CRUSH_COUNT})")
+        ok = False
+
+    if len(seeds_newly_broken) > MAX_NEWLY_BROKEN:
+        reasons.append(f"{len(seeds_newly_broken)} previously-ok seed(s) newly broken: {seeds_newly_broken}")
+        ok = False
+
+    if not other_classes_unchanged:
+        reasons.append("apply()/replay changed results for a non-target object class")
+        ok = False
+
+    if ok:
+        reasons.append(
+            f"passed: validate ok, crush_count=0, newly_broken=0, fixed {len(seeds_fixed)}/{n_baseline_drops} "
+            f"(Wilson 95% CI lower bound {fixed_rate_ci95[0]:.3f} >= {MIN_FIXED_RATE_CI95_LOWER})"
+        )
+
+    record = Check1Record(
+        target_class=target_class,
+        drops_before=before.n_drop,
+        drops_after=after.n_drop,
+        other_classes_unchanged=other_classes_unchanged,
+        crush_count=crush_count_after,
+        cited_report_ids=list(rule.source_report_ids),
+    )
+
+    return Check1Outcome(
+        passed=ok,
+        reasons=reasons,
+        record=record,
+        drop_rate_before=before.drop_rate,
+        drop_rate_after=after.drop_rate,
+        drop_rate_before_ci95=llm_stats.wilson(before.n_drop, before.n_trials),
+        drop_rate_after_ci95=llm_stats.wilson(after.n_drop, after.n_trials),
+        seeds_fixed=seeds_fixed,
+        seeds_newly_broken=seeds_newly_broken,
+        fixed_rate_ci95=fixed_rate_ci95,
+        crush_count_after=crush_count_after,
+        margin=margin,
+        slowdown_proxy=slowdown_proxy,
+        n_trials=before.n_trials,
+    )
+
+
+if __name__ == "__main__":
+    import argparse
+    import datetime as dt
+
+    from rules.schema import Rule
+
+    p = argparse.ArgumentParser(description="Run Check 1 on a hand-built glass_jar rule, for a quick manual check.")
+    p.add_argument("--grip-force-min-n", type=float, default=14.0)
+    p.add_argument("--carry-accel-max-ms2", type=float, default=2.5)
+    p.add_argument("--object-class", default="glass_jar")
+    p.add_argument("--n-seeds", type=int, default=len(DEFAULT_TRAIN_SEEDS))
+    args = p.parse_args()
+
+    rule = Rule(
+        rule_id="r_manual_check1",
+        object_class=args.object_class,
+        grip_force_min_n=args.grip_force_min_n,
+        carry_accel_max_ms2=args.carry_accel_max_ms2,
+        proposed_by="manual",
+        created_at=dt.datetime.now(dt.timezone.utc),
+        rationale="manual check1.py invocation",
+        source_report_ids=["manual"],
+    )
+    outcome = check1(rule, range(args.n_seeds))
+    print(f"PASSED: {outcome.passed}")
+    for r in outcome.reasons:
+        print(f"  - {r}")
+    print(f"drop_rate_before={outcome.drop_rate_before} (CI95 {outcome.drop_rate_before_ci95})")
+    print(f"drop_rate_after={outcome.drop_rate_after} (CI95 {outcome.drop_rate_after_ci95})")
+    print(f"seeds_fixed={outcome.seeds_fixed}")
+    print(f"seeds_newly_broken={outcome.seeds_newly_broken}")
+    print(f"margin={outcome.margin:.3f} slowdown_proxy={outcome.slowdown_proxy:.3f}")
+    print(f"record={outcome.record}")

@@ -1,4 +1,6 @@
 """Solver: failure reports -> Rule or NoSafeRule, via an OpenAI-compatible chat endpoint."""
+import hashlib
+import itertools
 import json
 import os
 import random
@@ -55,13 +57,45 @@ def get_metrics():
     }
 
 
-# Per-attempt bookkeeping for the most recent solve() call, read by smoke_real.py.
+# Per-attempt bookkeeping for the most recent solve() call, read by smoke_real.py
+# and pipeline/loop.py (for its per-candidate "cost" field).
 # attempt_errors[i] is None if attempt i+1 succeeded, else its failure reason.
-_LAST_CALL = {"attempts": 0, "attempt_errors": []}
+# usage_per_attempt[i] is the HTTP response's `usage` field (prompt/completion/
+# total tokens) as a dict if the backend sent one, else None -- llm/fake_server.py
+# never sends one (it has no token costs to report), so this is always None
+# against the stub; a real OpenAI-compatible backend typically does.
+_LAST_CALL = {"attempts": 0, "attempt_errors": [], "usage_per_attempt": []}
 
 
 def get_last_call_info():
-    return {"attempts": _LAST_CALL["attempts"], "attempt_errors": list(_LAST_CALL["attempt_errors"])}
+    return {
+        "attempts": _LAST_CALL["attempts"],
+        "attempt_errors": list(_LAST_CALL["attempt_errors"]),
+        "usage_per_attempt": list(_LAST_CALL["usage_per_attempt"]),
+    }
+
+
+# A real model can copy rule_id straight out of a few-shot example (or
+# repeat the same guess across sampled candidates) instead of inventing a
+# fresh one -- see solve()'s post-parse overwrite below. The counter makes
+# the id unique across calls in this process even when two replies are
+# byte-for-byte identical content; it is process-local and never persisted.
+_rule_id_counter = itertools.count(1)
+
+
+def reset_rule_id_counter():
+    """Test-only: restart the counter at 1 so id suffixes are predictable."""
+    global _rule_id_counter
+    _rule_id_counter = itertools.count(1)
+
+
+def _assign_unique_rule_id(rule) -> str:
+    content = "|".join([
+        str(rule.object_class), str(rule.grip_force_min_n), str(rule.carry_accel_max_ms2),
+        ",".join(sorted(rule.source_report_ids)),
+    ])
+    short_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
+    return f"r_{short_hash}_{next(_rule_id_counter)}"
 
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
@@ -141,9 +175,19 @@ def _call(client, messages, max_tokens):
         raise RuntimeError(f"solve() failed: HTTP {e.status_code} (not retried): {body}") from e
 
 
-def solve(failure_reports):
+def solve(failure_reports, feedback=None):
+    """failure_reports -> Rule | NoSafeRule.
+
+    `feedback` (optional, default None): plain text appended to the user
+    message, e.g. a prior rejected rule plus its replay result, so a
+    caller doing propose -> replay -> feedback -> re-propose can ask for
+    a better candidate without changing the system prompt or examples.
+    Default None reproduces the exact prior behavior (one JSON-only user
+    message), so every existing caller/test is unaffected.
+    """
     _LAST_CALL["attempts"] = 0
     _LAST_CALL["attempt_errors"] = []
+    _LAST_CALL["usage_per_attempt"] = []
 
     try:
         client = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=REQUEST_TIMEOUT_S, max_retries=0)
@@ -157,7 +201,10 @@ def solve(failure_reports):
     for example in EXAMPLES:
         messages.append({"role": "user", "content": json.dumps(example["failure_reports"])})
         messages.append({"role": "assistant", "content": json.dumps(example["response"])})
-    messages.append({"role": "user", "content": json.dumps(failure_reports)})
+    user_content = json.dumps(failure_reports)
+    if feedback:
+        user_content += "\n\n" + feedback
+    messages.append({"role": "user", "content": user_content})
 
     max_tokens = MAX_TOKENS
     length_retry_used = False
@@ -165,6 +212,7 @@ def solve(failure_reports):
 
     for attempt in range(1 + MAX_RETRIES):
         _LAST_CALL["attempts"] = attempt + 1
+        _LAST_CALL["usage_per_attempt"].append(None)  # overwritten below if a response came back
         try:
             response = _call(client, messages, max_tokens)
         except _RateLimitTransientError as e:
@@ -183,6 +231,10 @@ def solve(failure_reports):
         except RuntimeError as e:
             _LAST_CALL["attempt_errors"].append(str(e))
             raise
+
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            _LAST_CALL["usage_per_attempt"][-1] = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
 
         if not response.choices or response.choices[0].message is None:
             last_err = "malformed response: no choices"
@@ -222,6 +274,14 @@ def solve(failure_reports):
                     f"source report(s) are {sorted(expected_object_classes)}"
                 )
                 obj = None
+            else:
+                # A real model may copy rule_id straight from a few-shot
+                # example (or repeat its own prior guess across candidates)
+                # instead of inventing a fresh one. Always overwrite with an
+                # id derived from this reply's own content plus a per-process
+                # counter, so rule_id is unique across calls even when two
+                # replies are byte-for-byte identical.
+                obj.rule_id = _assign_unique_rule_id(obj)
 
         if obj is not None:
             _LAST_CALL["attempt_errors"].append(None)

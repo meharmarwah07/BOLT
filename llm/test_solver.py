@@ -8,6 +8,7 @@ GET /__log__ endpoint). Run with:
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -423,6 +424,62 @@ def test_api_key_never_appears_in_solver_output():
         wait_for_port_free(PORT)
 
 
+def test_rule_id_always_overwritten_and_unique():
+    """A real model may copy rule_id from a few-shot example, or repeat its
+    own prior guess across sampled candidates. solve() must always
+    overwrite it with a fresh, unique id -- checked here by calling
+    solve() twice in one process against the stub (whose own reply ids are
+    already unique per request, r_fake_0001/r_fake_0002, but that alone
+    isn't the thing under test: it's solve()'s own overwrite)."""
+    if port_is_open(PORT):
+        return False, f"port {PORT} is already in use"
+    server = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, "FAKE_ALWAYS_GOOD": "1"},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if not wait_for_port(PORT):
+            return False, "stub server never started"
+        snippet = (
+            "import json, solver\n"
+            "reports = [{'report_id': 'fr_0001', 'object_class': 'glass_jar', "
+            "'controller': {'grip_force_n': 2.0, 'carry_accel_ms2': 6.0}, 'outcome': 'drop', "
+            "'drop_phase': 'lift', 'slip_mm_before_drop': 20.0, 'est_mass_kg': 0.4, 'seed': 2}]\n"
+            "r1 = solver.solve(reports)\n"
+            "r2 = solver.solve(reports)\n"
+            "print(json.dumps({'id1': r1.rule_id, 'id2': r2.rule_id}))\n"
+        )
+        env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        result = subprocess.run(
+            [sys.executable, "-c", snippet], cwd=HERE, env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False, f"snippet failed (rc={result.returncode}): {result.stderr.strip()!r}"
+        try:
+            ids = json.loads(result.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            return False, f"could not parse snippet output: {result.stdout!r}"
+
+        if ids["id1"] == ids["id2"]:
+            return False, f"two solve() calls with identical input produced the same rule_id: {ids}"
+        pattern = re.compile(r"^r_[0-9a-f]{8}_\d+$")
+        for key, val in ids.items():
+            if not pattern.match(val):
+                return False, f"{key}={val!r} does not match the expected r_<hash>_<counter> pattern"
+        if ids["id1"] in ("r_0001", "r_fake_0001") or ids["id2"] in ("r_0001", "r_fake_0001"):
+            return False, f"the stub's own id leaked through unmodified: {ids}"
+        return True, ""
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        wait_for_port_free(PORT)
+
+
 UNIT_TESTS = [
     ("examples.json Rules pass rule_check.parse_reply", test_examples_pass_real_validator),
     ("system prompt non-empty and mentions no_safe_rule", test_system_prompt_nonempty_and_mentions_no_safe_rule),
@@ -432,6 +489,7 @@ UNIT_TESTS = [
     ("HTTP 429 Retry-After is honoured and retried", test_429_retry_after_is_honoured),
     ("reasoning_effort is sent only when FLEET_LLM_REASONING_EFFORT is set", test_reasoning_effort_sent_only_when_set),
     ("API key never appears in solver.py stdout/stderr", test_api_key_never_appears_in_solver_output),
+    ("rule_id is always overwritten and unique across calls", test_rule_id_always_overwritten_and_unique),
 ]
 
 
