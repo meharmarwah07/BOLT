@@ -27,7 +27,12 @@ def _mu_for_seed(object_class, seed):
 
 
 def _bisect_min_holding_grip(object_class, seed, accel=1.0, iters=14):
-    crush = OBJECT_CLASSES[object_class]["crush_limit_n"]
+    # Use this SEED's actual (jittered) crush limit, not the nominal one --
+    # CRUSH_LIMIT_JITTER can push a seed's real limit below nominal*0.95,
+    # and without this the search could probe a grip that crushes for this
+    # seed, which the loop below would wrongly treat as "found a safe hold"
+    # (it only branches on outcome == "drop", not "crush").
+    crush = cell_model.jittered_crush_limit_n(object_class, seed)
     lo, hi = 0.05, min(49.0, crush * 0.95)
     for _ in range(iters):
         mid = (lo + hi) / 2
@@ -147,12 +152,17 @@ def test_glass_jar_drops_at_nominal_grip_and_is_fixed_within_range():
 
 
 def test_crush_outcome_at_commanded_force_over_limit():
-    # steel's crush_limit_n is 40.0; the check is grip > crush_limit, so
-    # exactly 40N must NOT crush, and just over it must.
-    at_limit = run_trial("steel", {"grip_force_n": 40.0, "carry_accel_ms2": 1.0}, seed=0)
+    # The check is grip > crush_limit, so exactly at the limit must NOT
+    # crush and just over it must. crush_limit_n is now jittered per
+    # (object_class, seed) (CRUSH_LIMIT_JITTER), so this queries seed=0's
+    # actual limit instead of asserting against the nominal 40.0 -- the
+    # old hardcoded 40.0/41.0 no longer straddles seed=0's real boundary
+    # (steel/seed=0 jitters to ~42.36N, so 41.0N no longer crushes).
+    limit = cell_model.jittered_crush_limit_n("steel", seed=0)
+    at_limit = run_trial("steel", {"grip_force_n": limit, "carry_accel_ms2": 1.0}, seed=0)
     assert at_limit.outcome != "crush"
 
-    over_limit = run_trial("steel", {"grip_force_n": 41.0, "carry_accel_ms2": 1.0}, seed=0)
+    over_limit = run_trial("steel", {"grip_force_n": limit + 1.0, "carry_accel_ms2": 1.0}, seed=0)
     assert over_limit.outcome == "crush"
 
 
@@ -191,7 +201,16 @@ def test_no_friction_or_mu_in_failure_report():
 # -- see STATUS.md. This locks in the *current* (unchanged) behavior so
 # the lever can't silently regress to fully inert (ratio -> 1.0) without
 # a test failure; it is not a claim that 1.2+ is achievable here.
-MEASURED_ACCEL_RATIO = {"steel": 1.027, "cardboard": 1.118, "glass_jar": 1.126}
+MEASURED_ACCEL_RATIO = {"steel": 1.027, "cardboard": 1.118, "glass_jar": 1.037}
+# glass_jar's value above changed from 1.126 (pre-jitter) to 1.037 after
+# CRUSH_LIMIT_JITTER was added: _bisect_min_holding_grip's search ceiling is
+# now this SEED's actual jittered crush limit, not the nominal one (needed
+# for correctness -- see that function's comment), and several of glass_jar's
+# seeds 0-5 bisect to a value pinned at/near that ceiling (STATUS.md item 2:
+# glass_jar's low-mu seeds are near-unholdable, close to the crush limit) --
+# so a per-seed ceiling that now varies with the jitter draw shifts the
+# measured ratio for THIS class specifically. steel/cardboard are nowhere
+# near their crush limits and are unaffected (unchanged from pre-jitter).
 
 
 @pytest.mark.parametrize("object_class", ["steel", "cardboard", "glass_jar"])
@@ -214,3 +233,63 @@ def test_accel_lever_ratio_not_inert(object_class):
 def test_held_out_seeds_not_used_by_default():
     assert HELD_OUT_SEEDS == range(1000, 1200)
     assert set(TRAIN_SEEDS).isdisjoint(set(HELD_OUT_SEEDS))
+
+
+def test_crush_limit_jitter_deterministic_per_seed():
+    """Same (object_class, seed) always gives the same jittered limit, and
+    it varies across seeds (not silently inert)."""
+    a = cell_model.jittered_crush_limit_n("glass_jar", seed=7)
+    b = cell_model.jittered_crush_limit_n("glass_jar", seed=7)
+    assert a == b
+    values = {cell_model.jittered_crush_limit_n("glass_jar", seed=s) for s in range(10)}
+    assert len(values) > 1
+
+
+def test_crush_limit_jitter_independent_of_placement_and_friction_stream():
+    """Crush-limit jitter must be drawn from its own RNG stream -- adding it
+    must not perturb the existing placement/friction draws for any seed
+    (both depend on run_trial's own rng = np.random.default_rng(seed),
+    untouched by jittered_crush_limit_n's separate SeedSequence)."""
+    for seed in range(5):
+        mu_before = _mu_for_seed("glass_jar", seed)
+        cell_model.jittered_crush_limit_n("glass_jar", seed)  # must not disturb anything
+        mu_after = _mu_for_seed("glass_jar", seed)
+        assert mu_before == mu_after
+
+
+def test_crush_limit_jitter_clipped_within_bounds():
+    sigma = cell_model.CRUSH_LIMIT_JITTER
+    clip = cell_model.CRUSH_LIMIT_JITTER_CLIP_SIGMAS
+    for cls, props in OBJECT_CLASSES.items():
+        nominal = props["crush_limit_n"]
+        lo = nominal * (1.0 - clip * sigma)
+        hi = nominal * (1.0 + clip * sigma)
+        for seed in range(50):
+            v = cell_model.jittered_crush_limit_n(cls, seed)
+            assert lo - 1e-9 <= v <= hi + 1e-9
+
+
+def test_crush_limit_jitter_zero_means_nominal():
+    monkeypatch_value = cell_model.CRUSH_LIMIT_JITTER
+    cell_model.CRUSH_LIMIT_JITTER = 0.0
+    try:
+        for cls, props in OBJECT_CLASSES.items():
+            assert cell_model.jittered_crush_limit_n(cls, seed=123) == props["crush_limit_n"]
+    finally:
+        cell_model.CRUSH_LIMIT_JITTER = monkeypatch_value
+
+
+def test_baseline_params_never_crush_despite_jitter():
+    """pipeline/check1.py's BASELINE_PARAMS (grip_force_n=5.0) must never
+    crush any class even at the jitter's worst-case (lowest) clipped draw --
+    otherwise seeds 0-4's real FailureReports (pipeline/loop.py's
+    real_failure_reports, run at BASELINE_PARAMS) could change behavior.
+    """
+    clip = cell_model.CRUSH_LIMIT_JITTER_CLIP_SIGMAS
+    sigma = cell_model.CRUSH_LIMIT_JITTER
+    for cls, props in OBJECT_CLASSES.items():
+        worst_case_limit = props["crush_limit_n"] * (1.0 - clip * sigma)
+        assert 5.0 < worst_case_limit, (
+            f"{cls}: worst-case jittered crush limit {worst_case_limit} is not safely "
+            "above BASELINE_PARAMS' grip_force_n=5.0"
+        )

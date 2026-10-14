@@ -6,6 +6,8 @@ properties or the motion profile math.
 """
 import math
 
+import numpy as np
+
 # crush_limit_n matches rules/limits.py's CRUSH_LIMIT_N exactly -- that's an
 # already-agreed placeholder shared with Parts B/C, not something to
 # reinvent here. mass_kg and friction_range are NEW: nothing upstream
@@ -26,6 +28,41 @@ OBJECT_CLASSES = {
 # wouldn't place a part at an exact (0,0) every time). +/-5mm is a
 # simulation design choice, not a measured tolerance.
 PLACEMENT_JITTER_M = 0.005
+
+# Per-trial crush-limit noise: CRUSH_LIMIT_N is a nominal datasheet number,
+# not an exact material constant -- a real crush threshold has manufacturing
+# and measurement variance too. Without this, "grip just under the nominal
+# crush limit" is risk-free against the (previously) deterministic sim,
+# which is exactly the modeling gap a held-out run (seeds 2000-2199) found:
+# a grip-near-crush-limit heuristic incurred zero crush cost it wouldn't
+# incur against a real part. Modeled as a normal multiplicative factor on
+# crush_limit_n, mean 1.0, sigma=CRUSH_LIMIT_JITTER (5% of nominal -- a
+# "your call" design choice, not a measured tolerance), clipped to
+# +/-CRUSH_LIMIT_JITTER_CLIP_SIGMAS standard deviations (so a rare extreme
+# draw can't put the limit somewhere absurd). Drawn from a SeedSequence
+# salted with _CRUSH_JITTER_SALT, an independent stream from the trial's own
+# rng (used for placement jitter then friction) -- this is deliberate so
+# adding crush noise does NOT perturb the existing placement/friction draws
+# for any seed; only trials whose grip is close enough to the (jittered)
+# crush limit can change outcome at all.
+CRUSH_LIMIT_JITTER = 0.05  # normal sigma, as a fraction of nominal crush_limit_n
+CRUSH_LIMIT_JITTER_CLIP_SIGMAS = 3.0
+_CRUSH_JITTER_SALT = 0x43525348_4A495454  # "CRSHJITT" read as hex digits, arbitrary fixed salt
+
+
+def jittered_crush_limit_n(object_class, seed):
+    """Deterministic given `seed`; see CRUSH_LIMIT_JITTER's comment above for
+    why this uses its own independent RNG stream rather than sharing the
+    trial's placement/friction rng."""
+    nominal = OBJECT_CLASSES[object_class]["crush_limit_n"]
+    if CRUSH_LIMIT_JITTER == 0.0:
+        return nominal
+    rng = np.random.default_rng(np.random.SeedSequence([seed, _CRUSH_JITTER_SALT]))
+    factor = 1.0 + float(rng.normal(0.0, CRUSH_LIMIT_JITTER))
+    lo = 1.0 - CRUSH_LIMIT_JITTER_CLIP_SIGMAS * CRUSH_LIMIT_JITTER
+    hi = 1.0 + CRUSH_LIMIT_JITTER_CLIP_SIGMAS * CRUSH_LIMIT_JITTER
+    factor = min(max(factor, lo), hi)
+    return nominal * factor
 
 
 def sample_friction(object_class, rng):

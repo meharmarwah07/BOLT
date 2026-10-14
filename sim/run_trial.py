@@ -25,6 +25,7 @@ from cell_model import (
     PLACEMENT_JITTER_M,
     build_xml,
     hold_steps_for,
+    jittered_crush_limit_n,
     motion_profile,
     sample_friction,
 )
@@ -87,7 +88,10 @@ def run_trial(object_class, params, seed):
         bx, bz = baseline_xz
         return math.hypot(gx - bx, gz - bz) * 1000.0
 
-    crushed = grip_force_n > obj_props["crush_limit_n"]
+    # cell_model.jittered_crush_limit_n(...) applies per-trial, per-seed
+    # noise around the nominal crush_limit_n (see its docstring) -- the
+    # real crush threshold, not the nominal datasheet number.
+    crushed = grip_force_n > jittered_crush_limit_n(object_class, seed)
 
     # Phase 1: settle.
     for _ in range(300):
