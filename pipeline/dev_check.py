@@ -31,6 +31,9 @@ for _p in (PIPELINE_DIR, SIM_DIR, LLM_DIR):
 
 import check1 as check1_mod  # pipeline/check1.py
 from batch import run_batch  # sim/batch.py
+from cell_model import phase_duration  # sim/cell_model.py
+from run_trial import CARRY_DISTANCE_M  # sim/run_trial.py
+import stats as llm_stats  # llm/stats.py
 
 from rules.schema import Rule
 
@@ -50,6 +53,27 @@ CEILING_GRIP, CEILING_ACCEL = 24.9, 0.5
 # regardless of jitter), accel across the full datasheet range.
 GRID_GRIPS = [14.0, 16.0, 18.0, 20.0, 21.0, 22.0, 23.0, 24.0, 24.9]
 GRID_ACCELS = [0.5, 1.0, 2.0, 3.0, 6.0]
+
+# Finer grid for --frontier (A2): 0.5N steps from 14.0 to 24.5, plus the
+# same 24.9 "near ceiling" endpoint used above -- fine enough to find the
+# drop/crush trade-off's actual minimum (not just bracket it).
+FRONTIER_GRIPS = [14.0 + 0.5 * i for i in range(22)] + [24.9]  # 14.0, 14.5, ..., 24.5, 24.9
+
+# A rule's carry_accel_max_ms2 is a CAP, combined with the baseline via
+# rules/apply.py's effective_settings: after_accel = min(current, rule's
+# cap). Since BASELINE_PARAMS' accel is 1.0, any cap >= 1.0 clamps to
+# exactly 1.0 (no effect) -- a Rule can only ever RESTRICT accel below the
+# baseline, never raise it. So the only physically-reachable-by-a-real-
+# Rule accel range is [CARRY_ACCEL_MIN_MS2, 1.0]; values above 1.0 would
+# measure the sim's raw sensitivity to literally commanding a faster carry
+# phase, which is informative on its own but is NOT what any Rule's accel
+# parameter can actually produce. FRONTIER_ACCELS therefore only sweeps
+# within [0.5, 1.0] (an earlier version of this grid swept 0.5-6.0 raw,
+# uncapped -- a real bug, since it reported different numbers for
+# equivalent-after-clamping accel caps 1.0/2.0/3.0/6.0; fixed by
+# _frontier_row itself clamping before running the batch, as a second,
+# belt-and-suspenders safeguard).
+FRONTIER_ACCELS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
 
 def _rule(rule_id, grip, accel, rationale):
@@ -107,10 +131,113 @@ def _row(label, rule, before_batch):
     }
 
 
+def _frontier_row(grip, accel, seeds):
+    """A single (grip, accel) point's achievable frontier numbers -- raw
+    sim measurement via run_batch, NOT check1() (no validate()/other-class
+    regression check -- this is a research sweep over raw params, not a
+    rule being gated). drop and crush are mutually exclusive per-trial
+    outcomes (sim/run_trial.py's TrialResult.outcome is exactly one of
+    "ok"/"drop"/"crush"), so combined failure = n_drop + n_crush.
+
+    `accel` is clamped to the baseline accel (rules/apply.py's own
+    effective_settings: after = min(current, rule's cap)) before it's
+    actually run -- see FRONTIER_ACCELS' comment for why: it's a Rule's
+    carry_accel_max_ms2, not a literal commanded accel.
+    """
+    nominal_accel = check1_mod.BASELINE_PARAMS["carry_accel_ms2"]
+    effective_accel = min(nominal_accel, accel)
+    batch = run_batch(TARGET_CLASS, {"grip_force_n": grip, "carry_accel_ms2": effective_accel}, seeds, parallel=True)
+    n = batch.n_trials
+    n_fail = batch.n_drop + batch.n_crush
+    duration_s = phase_duration(CARRY_DISTANCE_M, effective_accel)
+    slowdown_proxy = duration_s / phase_duration(CARRY_DISTANCE_M, nominal_accel)
+    return {
+        "grip": grip,
+        "accel": accel,
+        "effective_accel": effective_accel,
+        "n_trials": n,
+        "drop_rate": batch.drop_rate,
+        "drop_ci95": llm_stats.wilson(batch.n_drop, n),
+        "crush_rate": round(batch.n_crush / n, 4) if n else 0.0,
+        "crush_ci95": llm_stats.wilson(batch.n_crush, n),
+        "combined_rate": round(n_fail / n, 4) if n else 0.0,
+        "combined_ci95": llm_stats.wilson(n_fail, n),
+        "mean_duration_s": round(duration_s, 4),
+        "slowdown_proxy": round(slowdown_proxy, 4),
+    }
+
+
+def _pareto_front(rows, minimize=("combined_rate", "mean_duration_s")):
+    """Points not dominated by any other point on ALL of `minimize`'s keys
+    (dominated: some other row is <= on every key and < on at least one).
+    """
+    front = []
+    for r in rows:
+        dominated = any(
+            all(other[k] <= r[k] for k in minimize) and any(other[k] < r[k] for k in minimize)
+            for other in rows if other is not r
+        )
+        if not dominated:
+            front.append(r)
+    return sorted(front, key=lambda r: (r["combined_rate"], r["mean_duration_s"]))
+
+
+def _print_frontier_table(rows):
+    header = (
+        f"{'grip':>6}{'accel':>7}{'drop':>9}{'drop CI95':>18}{'crush':>9}{'crush CI95':>18}"
+        f"{'combined':>10}{'comb CI95':>18}{'duration_s':>12}"
+    )
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        dci, cci, kci = r["drop_ci95"], r["crush_ci95"], r["combined_ci95"]
+        print(
+            f"{r['grip']:>6.1f}{r['accel']:>7.1f}{r['drop_rate']:>9.3f}"
+            f"  [{dci[0]:.3f},{dci[1]:.3f}]{r['crush_rate']:>9.3f}  [{cci[0]:.3f},{cci[1]:.3f}]"
+            f"{r['combined_rate']:>10.3f}  [{kci[0]:.3f},{kci[1]:.3f}]{r['mean_duration_s']:>12.3f}"
+        )
+
+
+def run_frontier(grips=FRONTIER_GRIPS, accels=FRONTIER_ACCELS, seeds=DEV_SEEDS):
+    """A2: the achievable drop/crush/combined-failure frontier for a FIXED
+    (grip, accel) rule, independent of any gate's thresholds. Returns the
+    full row list (also used to print the table/Pareto front from main()
+    and reused by callers that want the raw numbers, e.g. a future
+    conditional-rule comparison)."""
+    return [_frontier_row(grip, accel, seeds) for grip in grips for accel in accels]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--skip-grid", action="store_true", help="only run the 3 reference rules, skip the grid")
+    ap.add_argument("--frontier", action="store_true",
+                     help="instead of the v2 pass/fail probe, compute the raw achievable "
+                          "drop/crush/combined-failure frontier over a finer grid (A2)")
     args = ap.parse_args()
+
+    if args.frontier:
+        print(
+            f"Fixed-rule frontier, {TARGET_CLASS}, DEV seeds {DEV_SEEDS.start}-{DEV_SEEDS.stop - 1} "
+            f"ONLY ({len(DEV_SEEDS)} seeds), {len(FRONTIER_GRIPS)} grips x {len(FRONTIER_ACCELS)} accels "
+            f"= {len(FRONTIER_GRIPS) * len(FRONTIER_ACCELS)} points\n"
+        )
+        rows = run_frontier()
+        _print_frontier_table(rows)
+        front = _pareto_front(rows)
+        print(f"\nPareto front (minimizing combined failure rate, then mean duration), {len(front)} point(s):")
+        _print_frontier_table(front)
+        best = min(rows, key=lambda r: r["combined_rate"])
+        print(
+            f"\nBEST ACHIEVABLE combined failure for any fixed rule: {best['combined_rate']:.3f} "
+            f"(Wilson 95% CI {best['combined_ci95']}) at grip={best['grip']}, accel={best['accel']} "
+            f"(drop={best['drop_rate']:.3f}, crush={best['crush_rate']:.3f})."
+        )
+        slowdowns = sorted({r["slowdown_proxy"] for r in rows})
+        print(
+            f"\nSlowdown_proxy values achieved across this grid: {slowdowns} "
+            f"(max possible given CARRY_ACCEL_MIN_MS2=0.5 is sqrt(2)~=1.41421)."
+        )
+        return
 
     print(
         f"Check 1 v{check1_mod.CHECK1_VERSION} probe, {TARGET_CLASS}, DEV seeds "

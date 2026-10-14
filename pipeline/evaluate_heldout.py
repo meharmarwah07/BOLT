@@ -17,11 +17,17 @@ condition in the JSON output, and the .md output adds a paired exact
 McNemar table (accepted_rule vs each baseline, task success) per cell,
 plus a task-success-rate and mean-duration column on the main table.
 
-Refuses to run without --held-out (CONTEXT.md: "held-out seeds ... used
-only for the final measurement"). Every actual run is appended to
+Refuses to run without --held-out or --dev (CONTEXT.md: "held-out seeds
+... used only for the final measurement"). A --held-out run is appended to
 pipeline/runs/heldout_access.log, written BEFORE any held-out seed is
 touched, so an aborted run still leaves a record that an attempt was
 made.
+
+--dev is a separate, safe-to-iterate path: it requires every seed in
+DEV_SEEDS_RANGE (5000-5199), never writes heldout_access.log, and stamps
+"DEV RUN" in its own output files (heldout_eval_<rule_id>_DEV.{json,md},
+never overwriting a real --held-out run's output). --held-out and --dev
+are mutually exclusive; the real --held-out path is otherwise unchanged.
 """
 import argparse
 import datetime as dt
@@ -60,6 +66,13 @@ ACCESS_LOG_PATH = os.path.join(RUNS_DIR, "heldout_access.log")
 
 CELL_B_SEEDS_DEFAULT = range(1000, 1100)
 CELL_C_SEEDS_DEFAULT = range(1100, 1200)
+
+# --dev mode (never touches held-out seeds or heldout_access.log): dev/
+# iteration seeds for this project are reserved as 5000-5199. --dev
+# refuses outside that range; see main()'s validation.
+DEV_SEEDS_RANGE = range(5000, 5200)
+DEV_CELL_B_SEEDS_DEFAULT = range(5000, 5100)
+DEV_CELL_C_SEEDS_DEFAULT = range(5100, 5200)
 
 # Permission model (CONTEXT.md section 7): A and B share an owner, C has a
 # different one. Not configurable beyond the sharing_enabled flag below --
@@ -258,24 +271,51 @@ def _mcnemar_table(cell_label, rows, accepted_name="accepted_rule"):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--held-out", action="store_true", help="required: confirms this run is allowed to touch held-out seeds")
+    p.add_argument("--held-out", action="store_true", help="required (unless --dev): confirms this run is allowed to touch held-out seeds")
+    p.add_argument("--dev", action="store_true",
+                    help="dev mode: seeds must be in DEV_SEEDS_RANGE (5000-5199), never touches "
+                         "heldout_access.log, and stamps DEV RUN in the output. Mutually exclusive with --held-out.")
     p.add_argument("--rule-json", default=os.path.join(RUNS_DIR, "accepted_rule.json"))
     p.add_argument("--audit-path", default=os.path.join(RUNS_DIR, "loop_demo_audit.jsonl"))
-    p.add_argument("--cell-b-start", type=int, default=CELL_B_SEEDS_DEFAULT.start)
-    p.add_argument("--cell-b-end", type=int, default=CELL_B_SEEDS_DEFAULT.stop)
-    p.add_argument("--cell-c-start", type=int, default=CELL_C_SEEDS_DEFAULT.start)
-    p.add_argument("--cell-c-end", type=int, default=CELL_C_SEEDS_DEFAULT.stop)
+    p.add_argument("--cell-b-start", type=int, default=None)
+    p.add_argument("--cell-b-end", type=int, default=None)
+    p.add_argument("--cell-c-start", type=int, default=None)
+    p.add_argument("--cell-c-end", type=int, default=None)
     p.add_argument("--actor", default="pipeline-evaluate-heldout")
     args = p.parse_args()
 
-    if not args.held_out:
+    if args.held_out and args.dev:
+        print("REFUSED: --held-out and --dev are mutually exclusive -- choose one.", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.held_out and not args.dev:
         print(
-            "REFUSED: --held-out was not passed. This script only runs against held-out "
-            "seeds, which must never be touched while iterating on a rule. Re-run with "
-            "--held-out if this is really the final measurement.",
+            "REFUSED: neither --held-out nor --dev was passed. This script only runs against "
+            "held-out seeds (--held-out, the final measurement) or DEV seeds 5000-5199 "
+            "(--dev, safe to iterate with). Re-run with one of the two.",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if args.dev:
+        cell_b_start = args.cell_b_start if args.cell_b_start is not None else DEV_CELL_B_SEEDS_DEFAULT.start
+        cell_b_end = args.cell_b_end if args.cell_b_end is not None else DEV_CELL_B_SEEDS_DEFAULT.stop
+        cell_c_start = args.cell_c_start if args.cell_c_start is not None else DEV_CELL_C_SEEDS_DEFAULT.start
+        cell_c_end = args.cell_c_end if args.cell_c_end is not None else DEV_CELL_C_SEEDS_DEFAULT.stop
+        for name, start, end in (("cell-b", cell_b_start, cell_b_end), ("cell-c", cell_c_start, cell_c_end)):
+            if not (DEV_SEEDS_RANGE.start <= start and end <= DEV_SEEDS_RANGE.stop):
+                print(
+                    f"REFUSED: --dev requires every seed in DEV_SEEDS_RANGE "
+                    f"[{DEV_SEEDS_RANGE.start}, {DEV_SEEDS_RANGE.stop}) -- got --{name} "
+                    f"[{start}, {end}).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+    else:
+        cell_b_start = args.cell_b_start if args.cell_b_start is not None else CELL_B_SEEDS_DEFAULT.start
+        cell_b_end = args.cell_b_end if args.cell_b_end is not None else CELL_B_SEEDS_DEFAULT.stop
+        cell_c_start = args.cell_c_start if args.cell_c_start is not None else CELL_C_SEEDS_DEFAULT.start
+        cell_c_end = args.cell_c_end if args.cell_c_end is not None else CELL_C_SEEDS_DEFAULT.stop
 
     if not os.path.exists(args.rule_json):
         print(
@@ -290,6 +330,9 @@ def main():
     rule_label = accepted_data.get("label")
     rule = Rule.model_validate(accepted_data["rule"])
 
+    dev_banner = "DEV RUN -- seeds 5000-5199, not a held-out measurement" if args.dev else None
+    if dev_banner:
+        print(dev_banner)
     stub_banner = rule_label or (STUB_LABEL if accepted_data.get("is_stub") else None)
     if stub_banner:
         print(stub_banner)
@@ -307,18 +350,19 @@ def main():
 
     _ensure_approved(args.audit_path, rule, args.actor)
 
-    cell_b_seeds = range(args.cell_b_start, args.cell_b_end)
-    cell_c_seeds = range(args.cell_c_start, args.cell_c_end)
+    cell_b_seeds = range(cell_b_start, cell_b_end)
+    cell_c_seeds = range(cell_c_start, cell_c_end)
 
     os.makedirs(RUNS_DIR, exist_ok=True)
-    with open(ACCESS_LOG_PATH, "a") as f:
-        f.write(json.dumps({
-            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "actor": args.actor,
-            "rule_id": rule.rule_id,
-            "cell_b_seeds": [cell_b_seeds.start, cell_b_seeds.stop],
-            "cell_c_seeds": [cell_c_seeds.start, cell_c_seeds.stop],
-        }) + "\n")
+    if not args.dev:
+        with open(ACCESS_LOG_PATH, "a") as f:
+            f.write(json.dumps({
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "actor": args.actor,
+                "rule_id": rule.rule_id,
+                "cell_b_seeds": [cell_b_seeds.start, cell_b_seeds.stop],
+                "cell_c_seeds": [cell_c_seeds.start, cell_c_seeds.stop],
+            }) + "\n")
 
     target_class = _class_value(rule.object_class)
     cell_a = CellState("A", OWNER_A_B, check1_mod.BASELINE_PARAMS)
@@ -398,6 +442,7 @@ def main():
         }
 
     report = {
+        "dev_run": args.dev,
         "stub_label": stub_banner,
         "notice": top_notice,
         "baseline_params": dict(check1_mod.BASELINE_PARAMS),
@@ -411,11 +456,14 @@ def main():
     }
 
     os.makedirs(RUNS_DIR, exist_ok=True)
-    json_path = os.path.join(RUNS_DIR, f"heldout_eval_{rule.rule_id}.json")
+    file_suffix = "_DEV" if args.dev else ""
+    json_path = os.path.join(RUNS_DIR, f"heldout_eval_{rule.rule_id}{file_suffix}.json")
     with open(json_path, "w") as f:
         json.dump(report, f, indent=2)
 
-    md_lines = [f"# Held-out evaluation: {rule.rule_id} ({target_class})", ""]
+    md_lines = [f"# Held-out evaluation: {rule.rule_id} ({target_class}){' [DEV RUN]' if args.dev else ''}", ""]
+    if dev_banner:
+        md_lines += [dev_banner, ""]
     if stub_banner:
         md_lines += [stub_banner, ""]
     md_lines += [top_notice, ""]
@@ -433,7 +481,7 @@ def main():
         if mcnemar_md:
             md_lines.append(mcnemar_md)
             md_lines.append("")
-    md_path = os.path.join(RUNS_DIR, f"heldout_eval_{rule.rule_id}.md")
+    md_path = os.path.join(RUNS_DIR, f"heldout_eval_{rule.rule_id}{file_suffix}.md")
     with open(md_path, "w") as f:
         f.write("\n".join(md_lines))
 

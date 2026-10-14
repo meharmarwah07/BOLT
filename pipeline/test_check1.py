@@ -276,10 +276,15 @@ def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=20.
     if os.path.exists(audit_path):
         os.remove(audit_path)
     lifecycle.transition(audit_path, rule.rule_id, lifecycle.State.PROPOSED, "test")
-    # version=1: default grip/accel (20.0/1.0) clears v1, not v2 -- see
-    # GOOD_GLASS_JAR's comment above. This helper needs a CHECK1_PASSED
-    # rule to seed the held-out demo flow, not to exercise v2's gate.
-    outcome = check1_mod.check1(rule, range(30), version=1)
+    # version=1, 100 seeds (not 30): default grip/accel (20.0/1.0) clears
+    # v1, not v2 -- see GOOD_GLASS_JAR's comment above. 100 seeds, not 30:
+    # same reason as test_good_rule_passes -- grip=20's ~63-70% fixed rate
+    # is noisy enough at n=30 that its Wilson lower bound doesn't reliably
+    # clear 0.5 (a real bug found here: at n=30 this previously-untested
+    # path actually failed v1, leaving the rule CHECK1_FAILED instead of
+    # CHECK1_PASSED). This helper needs a CHECK1_PASSED rule to seed the
+    # held-out demo flow, not to exercise v2's gate.
+    outcome = check1_mod.check1(rule, range(100), version=1)
     lifecycle.record_check1(audit_path, rule.rule_id, "test", outcome.passed, outcome.record)
     with open(rule_json_path, "w") as f:
         json.dump({
@@ -291,16 +296,26 @@ def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=20.
 
 
 def test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label():
+    """Was pinned to --held-out against seeds 1000-1199 (the spent held-out
+    range); retargeted to --dev against DEV_SEEDS_RANGE (5000-5199) so this
+    actually runs instead of being skipped. --dev takes the same code path
+    as --held-out apart from the access-log write and the DEV RUN/_DEV
+    filename stamp, so this still exercises the real can_share()/ceiling/
+    stub-label logic end to end.
+    """
     rule_json = os.path.join(HERE, "runs", "test_heldout_rule.json")
     audit_path = os.path.join(HERE, "runs", "test_heldout_audit.jsonl")
     rule = _write_demo_accepted_rule(rule_json, audit_path, is_stub=True)
 
+    access_log = os.path.join(HERE, "runs", "heldout_access.log")
+    access_log_before = open(access_log).read() if os.path.exists(access_log) else None
+
     result = subprocess.run(
         [
-            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--dev",
             "--rule-json", rule_json, "--audit-path", audit_path,
-            "--cell-b-start", "1000", "--cell-b-end", "1010",
-            "--cell-c-start", "1100", "--cell-c-end", "1110",
+            "--cell-b-start", "5000", "--cell-b-end", "5010",
+            "--cell-c-start", "5100", "--cell-c-end", "5110",
         ],
         cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
     )
@@ -308,14 +323,22 @@ def test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label():
         return False, f"evaluate_heldout.py failed (rc={result.returncode}): {result.stderr.strip()!r}"
     if evaluate_heldout_mod.STUB_LABEL not in result.stdout:
         return False, f"expected {evaluate_heldout_mod.STUB_LABEL!r} in stdout; got {result.stdout[:300]!r}"
+    if "DEV RUN" not in result.stdout:
+        return False, f"expected a DEV RUN stamp in stdout; got {result.stdout[:300]!r}"
 
-    json_path = os.path.join(HERE, "runs", f"heldout_eval_{rule.rule_id}.json")
+    access_log_after = open(access_log).read() if os.path.exists(access_log) else None
+    if access_log_before != access_log_after:
+        return False, "heldout_access.log changed even though --dev was used, not --held-out"
+
+    json_path = os.path.join(HERE, "runs", f"heldout_eval_{rule.rule_id}_DEV.json")
     with open(json_path) as f:
         report = json.load(f)
+    if not report.get("dev_run"):
+        return False, f"expected dev_run=true in the written JSON; got {report.get('dev_run')!r}"
     if report.get("stub_label") != evaluate_heldout_mod.STUB_LABEL:
         return False, f"expected stub_label={evaluate_heldout_mod.STUB_LABEL!r} in the written JSON; got {report.get('stub_label')!r}"
 
-    md_path = os.path.join(HERE, "runs", f"heldout_eval_{rule.rule_id}.md")
+    md_path = os.path.join(HERE, "runs", f"heldout_eval_{rule.rule_id}_DEV.md")
     if evaluate_heldout_mod.STUB_LABEL not in open(md_path).read():
         return False, f"expected {evaluate_heldout_mod.STUB_LABEL!r} in the written .md"
 
