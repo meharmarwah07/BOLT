@@ -30,6 +30,7 @@ for _p in (PIPELINE_DIR, SIM_DIR, LLM_DIR):
         sys.path.insert(0, _p)
 
 import check1 as check1_mod  # pipeline/check1.py
+import cell_model  # sim/cell_model.py
 from batch import run_batch  # sim/batch.py
 from cell_model import phase_duration  # sim/cell_model.py
 from run_trial import CARRY_DISTANCE_M  # sim/run_trial.py
@@ -74,6 +75,167 @@ FRONTIER_GRIPS = [14.0 + 0.5 * i for i in range(22)] + [24.9]  # 14.0, 14.5, ...
 # _frontier_row itself clamping before running the batch, as a second,
 # belt-and-suspenders safeguard).
 FRONTIER_ACCELS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+# B4: conditional rule type (grip = grip_fraction * probe reading).
+# Selection happens on DEV_SEEDS (5000-5099); EVAL_SEEDS is a SEPARATE
+# split (5100-5199) used only to re-check whatever wins on DEV_SEEDS,
+# so selection and evaluation never share seeds (guards against picking
+# a config that just got lucky on the selection set).
+EVAL_SEEDS = range(5100, 5200)
+
+# Focused around 1.0 (where the fixed-rule tradeoff's valley was) since a
+# well-calibrated probe reading should track the true limit closely enough
+# that grip_fraction near 1.0 is the interesting region; a few points
+# further out bracket the edges.
+CONDITIONAL_GRIP_FRACTIONS = [0.70, 0.75, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98, 1.00, 1.05, 1.10, 1.20]
+CONDITIONAL_ACCELS = FRONTIER_ACCELS
+
+# Amendment 3: sweep PROBE_SIGMA including 0 (a noiseless probe -- an
+# upper bound on how good the conditional rule could ever be) and 0.30
+# (a very noisy one -- should degrade back toward the fixed-rule floor;
+# if it doesn't, that's a sign of information leakage, e.g. the "probe"
+# accidentally carrying the true limit through some other channel).
+PROBE_SIGMAS_SWEEP = [0.0, 0.01, 0.03, 0.05, 0.10, 0.30]
+
+
+def _conditional_frontier_row(grip_fraction, accel, seeds, probe_sigma=None):
+    """Same idea as _frontier_row, but for the conditional rule type.
+    accel is clamped the same way (a Rule's carry_accel_max_ms2 cap can
+    only restrict, never exceed, the 1.0 nominal baseline)."""
+    nominal_accel = check1_mod.BASELINE_PARAMS["carry_accel_ms2"]
+    effective_accel = min(nominal_accel, accel)
+    params = {"grip_fraction": grip_fraction, "carry_accel_ms2": effective_accel}
+    if probe_sigma is not None:
+        params["probe_sigma"] = probe_sigma
+    batch = run_batch(TARGET_CLASS, params, seeds, parallel=True)
+    n = batch.n_trials
+    n_fail = batch.n_drop + batch.n_crush
+    duration_s = phase_duration(CARRY_DISTANCE_M, effective_accel)
+    return {
+        "grip_fraction": grip_fraction,
+        "accel": accel,
+        "effective_accel": effective_accel,
+        "probe_sigma": probe_sigma if probe_sigma is not None else cell_model.PROBE_SIGMA,
+        "n_trials": n,
+        "drop_rate": batch.drop_rate,
+        "drop_ci95": llm_stats.wilson(batch.n_drop, n),
+        "crush_rate": round(batch.n_crush / n, 4) if n else 0.0,
+        "crush_ci95": llm_stats.wilson(batch.n_crush, n),
+        "combined_rate": round(n_fail / n, 4) if n else 0.0,
+        "combined_ci95": llm_stats.wilson(n_fail, n),
+        "mean_duration_s": round(duration_s, 4),
+        "batch": batch,  # kept for McNemar/task-success reuse; stripped before printing
+    }
+
+
+def run_conditional_frontier(grip_fractions=CONDITIONAL_GRIP_FRACTIONS, accels=CONDITIONAL_ACCELS, seeds=DEV_SEEDS, probe_sigma=None):
+    return [_conditional_frontier_row(gf, a, seeds, probe_sigma=probe_sigma) for gf in grip_fractions for a in accels]
+
+
+def _print_conditional_table(rows):
+    header = (
+        f"{'grip_frac':>9}{'accel':>7}{'drop':>9}{'drop CI95':>18}{'crush':>9}{'crush CI95':>18}"
+        f"{'combined':>10}{'comb CI95':>18}{'duration_s':>12}"
+    )
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        dci, cci, kci = r["drop_ci95"], r["crush_ci95"], r["combined_ci95"]
+        print(
+            f"{r['grip_fraction']:>9.2f}{r['accel']:>7.1f}{r['drop_rate']:>9.3f}"
+            f"  [{dci[0]:.3f},{dci[1]:.3f}]{r['crush_rate']:>9.3f}  [{cci[0]:.3f},{cci[1]:.3f}]"
+            f"{r['combined_rate']:>10.3f}  [{kci[0]:.3f},{kci[1]:.3f}]{r['mean_duration_s']:>12.3f}"
+        )
+
+
+def _mcnemar_between_batches(batch_a, batch_b):
+    """Paired exact McNemar (task success, outcome == "ok") between two
+    BatchSummary objects measured on the SAME seeds."""
+    success_a = {r.seed: r.outcome == "ok" for r in batch_a.results}
+    success_b = {r.seed: r.outcome == "ok" for r in batch_b.results}
+    common = sorted(set(success_a) & set(success_b))
+    b = sum(1 for s in common if success_a[s] and not success_b[s])
+    c = sum(1 for s in common if not success_a[s] and success_b[s])
+    return b, c, llm_stats.mcnemar_exact(b, c)
+
+
+def run_phase_b():
+    print(
+        f"=== B4: conditional rule sweep, {TARGET_CLASS}, selection seeds "
+        f"{DEV_SEEDS.start}-{DEV_SEEDS.stop - 1}, probe_sigma={cell_model.PROBE_SIGMA} (default) ===\n"
+    )
+    cond_rows = run_conditional_frontier(probe_sigma=cell_model.PROBE_SIGMA)
+    _print_conditional_table(cond_rows)
+    best_conditional = min(cond_rows, key=lambda r: r["combined_rate"])
+    print(
+        f"\nBest conditional (selection set): grip_fraction={best_conditional['grip_fraction']}, "
+        f"accel={best_conditional['accel']}, combined_rate={best_conditional['combined_rate']:.3f} "
+        f"(Wilson 95% CI {best_conditional['combined_ci95']}, drop={best_conditional['drop_rate']:.3f}, "
+        f"crush={best_conditional['crush_rate']:.3f})"
+    )
+
+    print(f"\n=== Best fixed rule (from A2's --frontier, zero-crush option): grip=21.5, accel=0.6 ===")
+    best_fixed_row = _frontier_row(21.5, 0.6, DEV_SEEDS)
+    print(
+        f"combined_rate={best_fixed_row['combined_rate']:.3f} (Wilson 95% CI {best_fixed_row['combined_ci95']}, "
+        f"drop={best_fixed_row['drop_rate']:.3f}, crush={best_fixed_row['crush_rate']:.3f})"
+    )
+
+    print(f"\n=== Amendment 3: PROBE_SIGMA sweep at the best conditional (grip_fraction="
+          f"{best_conditional['grip_fraction']}, accel={best_conditional['accel']}), selection seeds ===\n")
+    sigma_rows = []
+    for sigma in PROBE_SIGMAS_SWEEP:
+        row = _conditional_frontier_row(best_conditional["grip_fraction"], best_conditional["accel"], DEV_SEEDS, probe_sigma=sigma)
+        sigma_rows.append(row)
+        print(
+            f"  probe_sigma={sigma:<5} drop={row['drop_rate']:.3f}  crush={row['crush_rate']:.3f}  "
+            f"combined={row['combined_rate']:.3f}  (Wilson 95% CI {row['combined_ci95']})"
+        )
+    worst_sigma_row = sigma_rows[-1]  # sigma=0.30
+    fixed_floor = best_fixed_row["combined_rate"]
+    print(
+        f"\nAt probe_sigma=0.30, combined={worst_sigma_row['combined_rate']:.3f} vs the fixed-rule floor "
+        f"{fixed_floor:.3f}. "
+        + ("Degrades to (at/above) the fixed-rule floor, as expected for a very noisy probe."
+           if worst_sigma_row["combined_rate"] >= fixed_floor - 0.02
+           else "DOES NOT degrade to the fixed-rule floor despite heavy probe noise -- "
+                "investigate for information leakage (e.g. the probe accidentally reflecting "
+                "the true limit through an unintended channel).")
+    )
+
+    print(f"\n=== Evaluating dev winners on a SEPARATE split: EVAL_SEEDS {EVAL_SEEDS.start}-{EVAL_SEEDS.stop - 1} ===\n")
+    eval_baseline = run_batch(TARGET_CLASS, check1_mod.BASELINE_PARAMS, EVAL_SEEDS, parallel=True)
+    eval_fixed = _frontier_row(21.5, 0.6, EVAL_SEEDS)
+    eval_conditional = _conditional_frontier_row(
+        best_conditional["grip_fraction"], best_conditional["accel"], EVAL_SEEDS, probe_sigma=check1_mod.SUCCESS_CRITERION_PROBE_SIGMA
+    )
+    print(
+        f"best fixed   (grip=21.5, accel=0.6)  on EVAL_SEEDS: combined={eval_fixed['combined_rate']:.3f} "
+        f"(Wilson 95% CI {eval_fixed['combined_ci95']}, drop={eval_fixed['drop_rate']:.3f}, crush={eval_fixed['crush_rate']:.3f})"
+    )
+    print(
+        f"best conditional (grip_fraction={best_conditional['grip_fraction']}, accel={best_conditional['accel']}, "
+        f"probe_sigma={check1_mod.SUCCESS_CRITERION_PROBE_SIGMA}) on EVAL_SEEDS: "
+        f"combined={eval_conditional['combined_rate']:.3f} (Wilson 95% CI {eval_conditional['combined_ci95']}, "
+        f"drop={eval_conditional['drop_rate']:.3f}, crush={eval_conditional['crush_rate']:.3f})"
+    )
+
+    b, c, p = _mcnemar_between_batches(eval_conditional["batch"], eval_fixed["batch"])
+    print(f"\nPaired exact McNemar (task success), conditional vs fixed, on EVAL_SEEDS: b={b}, c={c}, p={p:.4f}")
+
+    print("\n=== Pre-registered success criterion (not a check1 gate) ===")
+    combined_ok = eval_conditional["combined_ci95"][1] <= check1_mod.SUCCESS_CRITERION_MAX_COMBINED_FAILURE_CI95_UPPER
+    mcnemar_ok = p < check1_mod.SUCCESS_CRITERION_MAX_MCNEMAR_P
+    print(
+        f"combined failure Wilson upper {eval_conditional['combined_ci95'][1]:.3f} <= "
+        f"{check1_mod.SUCCESS_CRITERION_MAX_COMBINED_FAILURE_CI95_UPPER}: {combined_ok}"
+    )
+    print(f"McNemar p {p:.4f} < {check1_mod.SUCCESS_CRITERION_MAX_MCNEMAR_P}: {mcnemar_ok}")
+    print(f"SUCCESS CRITERION MET: {combined_ok and mcnemar_ok}")
+
+    v2_1_fixed_ok = eval_fixed["combined_ci95"][1] <= check1_mod.MAX_COMBINED_FAILURE_CI95_UPPER and eval_fixed["crush_rate"] == 0.0
+    v2_1_conditional_ok = eval_conditional["combined_ci95"][1] <= check1_mod.MAX_COMBINED_FAILURE_CI95_UPPER and eval_conditional["crush_rate"] == 0.0
+    print(f"\nv2.1 admission filter on EVAL_SEEDS -- fixed rule passes: {v2_1_fixed_ok}; conditional rule passes: {v2_1_conditional_ok}")
 
 
 def _rule(rule_id, grip, accel, rationale):
@@ -164,6 +326,7 @@ def _frontier_row(grip, accel, seeds):
         "combined_ci95": llm_stats.wilson(n_fail, n),
         "mean_duration_s": round(duration_s, 4),
         "slowdown_proxy": round(slowdown_proxy, 4),
+        "batch": batch,  # kept for McNemar/task-success reuse; stripped before printing
     }
 
 
@@ -213,7 +376,14 @@ def main():
     ap.add_argument("--frontier", action="store_true",
                      help="instead of the v2 pass/fail probe, compute the raw achievable "
                           "drop/crush/combined-failure frontier over a finer grid (A2)")
+    ap.add_argument("--phase-b", action="store_true",
+                     help="B4: sweep the conditional rule type (grip_fraction x accel), sweep "
+                          "PROBE_SIGMA, and evaluate the dev winners on a separate seed split")
     args = ap.parse_args()
+
+    if args.phase_b:
+        run_phase_b()
+        return
 
     if args.frontier:
         print(
