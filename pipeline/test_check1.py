@@ -483,30 +483,100 @@ def test_lifecycle_logged_once_for_passing_rule():
     return True, ""
 
 
-def test_selection_picks_largest_crush_margin():
-    """Pure unit test of loop._pick_best_passing -- no server needed. Two
-    hand-built passing candidates with different margins; the smaller
-    grip_force_min_n (larger margin = 1 - grip/crush_limit) must win even
-    though it is listed second and even though the other has a smaller
-    slowdown_proxy (margin is the primary key, slowdown only breaks ties)."""
-    def _make(rule_id, margin, slowdown_proxy):
-        rec = loop_mod.AttemptRecord(round=1, candidate_index=1)
-        rec.rule = _rule(rule_id=rule_id)
-        rec.check1 = check1_mod.Check1Outcome(passed=True, margin=margin, slowdown_proxy=slowdown_proxy)
-        return rec
+def _make_attempt(rule_id, combined_upper, crush_count_after=0, margin=0.0, slowdown_proxy=1.0):
+    rec = loop_mod.AttemptRecord(round=1, candidate_index=1)
+    rec.rule = _rule(rule_id=rule_id)
+    rec.check1 = check1_mod.Check1Outcome(
+        passed=True,
+        combined_failure_ci95=(0.0, combined_upper),
+        crush_count_after=crush_count_after,
+        margin=margin,
+        slowdown_proxy=slowdown_proxy,
+    )
+    return rec
 
-    worse_margin_faster = _make("r_a", margin=0.04, slowdown_proxy=1.0)
-    better_margin_slower = _make("r_b", margin=0.40, slowdown_proxy=2.0)
-    best = loop_mod._pick_best_passing([worse_margin_faster, better_margin_slower])
+
+def test_selection_picks_lowest_combined_failure_upper_bound():
+    """Pure unit test of loop._pick_best_passing -- no server needed. The
+    STAGE A regression case: a candidate with a WORSE (smaller) margin but
+    a LOWER combined-failure Wilson upper bound must win over one with a
+    better margin but higher failure -- reproducing the real problem the
+    old margin-only key had (held-out 2000-2199: the accepted 20N rule,
+    picked for its margin, measured worse than 22.5N/24.9N heuristics)."""
+    worse_failure_better_margin = _make_attempt("r_a", combined_upper=0.40, margin=0.40, slowdown_proxy=1.0)
+    better_failure_worse_margin = _make_attempt("r_b", combined_upper=0.10, margin=0.04, slowdown_proxy=2.0)
+    best = loop_mod._pick_best_passing([worse_failure_better_margin, better_failure_worse_margin])
     if best is None or best.rule.rule_id != "r_b":
-        return False, f"expected r_b (margin 0.40) to win over r_a (margin 0.04); got {best.rule.rule_id if best else None}"
+        return False, (
+            f"expected r_b (combined_failure upper 0.10) to win over r_a (0.40) despite "
+            f"worse margin/slowdown; got {best.rule.rule_id if best else None}"
+        )
+    return True, ""
 
-    # Tie-break: equal margin, smallest slowdown_proxy wins.
-    tie_a = _make("r_c", margin=0.20, slowdown_proxy=3.0)
-    tie_b = _make("r_d", margin=0.20, slowdown_proxy=1.5)
-    best_tie = loop_mod._pick_best_passing([tie_a, tie_b])
-    if best_tie is None or best_tie.rule.rule_id != "r_d":
-        return False, f"expected r_d (slowdown 1.5) to win the margin tie over r_c (slowdown 3.0); got {best_tie.rule.rule_id if best_tie else None}"
+
+def test_selection_tie_break_order():
+    """Full tie-break chain: combined_failure upper, then crush_count
+    (lower wins), then margin (larger wins), then slowdown_proxy (smaller
+    wins) -- each level tested holding all earlier levels equal."""
+    # Level 2: equal combined_failure, crush_count differs.
+    more_crush = _make_attempt("r_crush_hi", combined_upper=0.20, crush_count_after=2, margin=0.5, slowdown_proxy=1.0)
+    less_crush = _make_attempt("r_crush_lo", combined_upper=0.20, crush_count_after=0, margin=0.1, slowdown_proxy=1.0)
+    best = loop_mod._pick_best_passing([more_crush, less_crush])
+    if best is None or best.rule.rule_id != "r_crush_lo":
+        return False, f"expected r_crush_lo (crush_count 0) to win the combined_failure tie; got {best.rule.rule_id if best else None}"
+
+    # Level 3: equal combined_failure and crush_count, margin differs.
+    lower_margin = _make_attempt("r_margin_lo", combined_upper=0.20, crush_count_after=0, margin=0.1, slowdown_proxy=1.0)
+    higher_margin = _make_attempt("r_margin_hi", combined_upper=0.20, crush_count_after=0, margin=0.4, slowdown_proxy=1.0)
+    best = loop_mod._pick_best_passing([lower_margin, higher_margin])
+    if best is None or best.rule.rule_id != "r_margin_hi":
+        return False, f"expected r_margin_hi (larger margin) to win the crush_count tie; got {best.rule.rule_id if best else None}"
+
+    # Level 4: equal combined_failure, crush_count, and margin, slowdown differs.
+    slower = _make_attempt("r_slow", combined_upper=0.20, crush_count_after=0, margin=0.3, slowdown_proxy=1.4)
+    faster = _make_attempt("r_fast", combined_upper=0.20, crush_count_after=0, margin=0.3, slowdown_proxy=1.0)
+    best = loop_mod._pick_best_passing([slower, faster])
+    if best is None or best.rule.rule_id != "r_fast":
+        return False, f"expected r_fast (smaller slowdown_proxy) to win the margin tie; got {best.rule.rule_id if best else None}"
+    return True, ""
+
+
+def test_selection_mixes_fixed_and_conditional_rules():
+    """combined_failure_ci95 is the same kind of number regardless of rule
+    type, so a fixed candidate and a conditional candidate must compare
+    cleanly on it -- unlike the old margin key (1 - grip/crush_limit for
+    fixed vs 1 - grip_fraction for conditional -- different quantities)."""
+    fixed = loop_mod.AttemptRecord(round=1, candidate_index=1)
+    fixed.rule = _rule(rule_id="r_fixed", grip_force_min_n=20.0, carry_accel_max_ms2=0.5)
+    fixed.check1 = check1_mod.Check1Outcome(
+        passed=True, combined_failure_ci95=(0.0, 0.30), crush_count_after=0, margin=0.2, slowdown_proxy=1.414,
+    )
+    conditional = loop_mod.AttemptRecord(round=1, candidate_index=2)
+    conditional.rule = Rule(
+        rule_id="r_conditional", object_class="glass_jar", rule_type="conditional", grip_fraction=0.9,
+        carry_accel_max_ms2=0.6, proposed_by="test", created_at=dt.datetime.now(dt.timezone.utc),
+        rationale="test", source_report_ids=["fr_0001"],
+    )
+    conditional.check1 = check1_mod.Check1Outcome(
+        passed=True, combined_failure_ci95=(0.0, 0.21), crush_count_after=0, margin=0.1, slowdown_proxy=1.187,
+    )
+    best = loop_mod._pick_best_passing([fixed, conditional])
+    if best is None or best.rule.rule_id != "r_conditional":
+        return False, (
+            f"expected r_conditional (combined_failure upper 0.21 < fixed's 0.30) to win across "
+            f"rule types; got {best.rule.rule_id if best else None}"
+        )
+    return True, ""
+
+
+def test_selection_returns_none_when_none_pass():
+    rec = loop_mod.AttemptRecord(round=1, candidate_index=1)
+    rec.rule = _rule(rule_id="r_failed")
+    rec.check1 = check1_mod.Check1Outcome(passed=False, combined_failure_ci95=(0.0, 0.9))
+    if loop_mod._pick_best_passing([rec]) is not None:
+        return False, "expected None when no candidate passed"
+    if loop_mod._pick_best_passing([]) is not None:
+        return False, "expected None for an empty attempt list"
     return True, ""
 
 
@@ -867,7 +937,10 @@ UNIT_TESTS = [
     ("feedback reaches the second request", test_feedback_reaches_second_request),
     ("loop returns the passing rule with CHECK1_PASSED", test_loop_returns_passing_rule_with_check1_passed),
     ("lifecycle events logged exactly once for the passing rule", test_lifecycle_logged_once_for_passing_rule),
-    ("selection picks the largest crush margin", test_selection_picks_largest_crush_margin),
+    ("selection picks the lowest combined-failure upper bound", test_selection_picks_lowest_combined_failure_upper_bound),
+    ("selection tie-break order: crush, margin, slowdown", test_selection_tie_break_order),
+    ("selection mixes fixed and conditional rules", test_selection_mixes_fixed_and_conditional_rules),
+    ("selection returns None when none pass", test_selection_returns_none_when_none_pass),
     ("sim crush limits match rules.limits.CRUSH_LIMIT_N", test_sim_crush_limits_match_rules_limits),
     ("no API key in any pipeline output", test_no_api_key_in_loop_output),
     ("mutation: flipping the crush check must fail a test, then restore", test_mutation_crush_check_catches_regression),

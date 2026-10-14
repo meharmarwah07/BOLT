@@ -4,10 +4,13 @@ section 4 steps 3-4), for one failure.
 Up to MAX_ROUNDS rounds of CANDIDATES_PER_ROUND candidates each. Every
 candidate is replayed for real through pipeline/check1.py (sim/run_trial.py
 under the hood). As soon as a round produces at least one PASSING
-candidate, the one with the largest crush margin (then smallest slowdown)
-is returned. If no round ever produces a passing candidate, returns a
-real rule_check.NoSafeRule("search exhausted") alongside the full record
-of every attempt made.
+candidate, the one with the lowest Wilson 95% upper bound of combined
+(drop-or-crush) failure on TRAIN seeds is returned (ties broken by lower
+crush count, then larger crush margin, then smaller slowdown) -- see
+_pick_best_passing's own docstring for why this replaced the original
+largest-crush-margin key. If no round ever produces a passing candidate,
+returns a real rule_check.NoSafeRule("search exhausted") alongside the
+full record of every attempt made.
 
 Even though both llm/solver.py and llm/fake_server.py now assign a fresh
 rule_id to every reply (see llm/solver.py's `_assign_unique_rule_id` and
@@ -161,15 +164,40 @@ def _build_feedback(round_attempts) -> str:
 
 
 def _pick_best_passing(round_attempts) -> Optional[AttemptRecord]:
-    """Among this round's PASSING candidates, the largest crush margin
-    wins, ties broken by the smallest slowdown. None if none passed.
+    """Among this round's PASSING candidates, the LOWEST Wilson 95% upper
+    bound of combined (drop-or-crush) failure on TRAIN seeds wins -- ties
+    broken by lower crush count, then larger crush margin, then smaller
+    slowdown_proxy. None if none passed.
+
+    Previously keyed on crush margin alone (largest wins): margin ignores
+    the per-trial crush jitter (sim/cell_model.py's CRUSH_LIMIT_JITTER)
+    and isn't comparable across rule types (a fixed rule's margin is
+    1 - grip/nominal_crush_limit; a conditional rule's is 1 - grip_
+    fraction -- different quantities that happen to share a name), so it
+    could and did pick the WEAKEST rule that cleared the gate -- the
+    held-out run on seeds 2000-2199 found the accepted 20N rule actually
+    performed worse than 22.5N/24.9N heuristics never shown to the LLM.
+    combined_failure_ci95 (pipeline/check1.py's Check1Outcome field,
+    already computed for every passing candidate regardless of version or
+    rule_type) is check1()'s own gate statistic, so it's both type-
+    agnostic and already reflects the measured jitter, not just a static
+    parameter.
+
     Factored out (not inlined in loop()) so the selection rule itself is
     directly unit-testable without going through solve()/fake_server.
     """
     passing = [r for r in round_attempts if r.rule is not None and r.check1 is not None and r.check1.passed]
     if not passing:
         return None
-    return min(passing, key=lambda r: (-r.check1.margin, r.check1.slowdown_proxy))
+    return min(
+        passing,
+        key=lambda r: (
+            r.check1.combined_failure_ci95[1],
+            r.check1.crush_count_after,
+            -r.check1.margin,
+            r.check1.slowdown_proxy,
+        ),
+    )
 
 
 def loop(
