@@ -19,9 +19,16 @@ plus a task-success-rate and mean-duration column on the main table.
 
 Refuses to run without --held-out or --dev (CONTEXT.md: "held-out seeds
 ... used only for the final measurement"). A --held-out run is appended to
-pipeline/runs/heldout_access.log, written BEFORE any held-out seed is
-touched, so an aborted run still leaves a record that an attempt was
-made.
+the access log (--access-log-path, default pipeline/runs/heldout_access.log),
+written BEFORE any held-out seed is touched, so an aborted run still
+leaves a record that an attempt was made.
+
+A --held-out run also REFUSES outright (no override) if its seeds overlap
+an already-spent range (docs/FINAL_PROTOCOL.md: 1000-1199, 2000-2199,
+5000-5199), and refuses a SECOND run touching the final held-out range
+3000-3199 once the access log already shows a prior one, unless
+--override-reason is given (itself recorded in the log). See
+SPENT_SEED_RANGES / FINAL_HELDOUT_SEED_RANGE below.
 
 --dev is a separate, safe-to-iterate path: it requires every seed in
 DEV_SEEDS_RANGE (5000-5199), never writes heldout_access.log, and stamps
@@ -74,6 +81,24 @@ DEV_SEEDS_RANGE = range(5000, 5200)
 DEV_CELL_B_SEEDS_DEFAULT = range(5000, 5100)
 DEV_CELL_C_SEEDS_DEFAULT = range(5100, 5200)
 
+# docs/FINAL_PROTOCOL.md: "Spent seeds: 1000-1199, 2000-2199, 5000-5199" --
+# already used (the pre-revision baseline measurement; 5000-5199 is also
+# DEV_SEEDS_RANGE, legitimately reused for --dev iteration, but must never
+# be reused as if it were a fresh --held-out measurement). A --held-out
+# run touching any of these is refused outright, with no override -- this
+# is a hard guard against contaminating a held-out comparison with seeds
+# whose outcome is already known, not a "used once" budget (see
+# FINAL_HELDOUT_SEED_RANGE below for that).
+SPENT_SEED_RANGES = (range(1000, 1200), range(2000, 2200), range(5000, 5200))
+
+# docs/FINAL_PROTOCOL.md: "Seeds 3000-3199 ... are used once. No rule,
+# prompt, gate or selection change after the first look." Enforced below
+# as a single-use guard keyed off heldout_access.log: a --held-out run
+# touching this range is refused once the log already shows a prior run
+# that touched it, unless --override-reason is given (itself recorded in
+# the log for audit, e.g. the first attempt was an infrastructure error).
+FINAL_HELDOUT_SEED_RANGE = range(3000, 3200)
+
 # Permission model (CONTEXT.md section 7): A and B share an owner, C has a
 # different one. Not configurable beyond the sharing_enabled flag below --
 # that's what section 7's permission model fixes, not something this
@@ -107,6 +132,83 @@ STUB_LABEL = "STUB RULE - not a model result"
 
 def _class_value(object_class) -> str:
     return object_class.value if hasattr(object_class, "value") else object_class
+
+
+def _overlaps(start, end, target_range) -> bool:
+    """True if the half-open seed range [start, end) overlaps `target_range`."""
+    return start < target_range.stop and end > target_range.start
+
+
+def check_spent_seed_guard(cell_ranges):
+    """cell_ranges: [(name, start, end), ...]. Returns a REFUSED message
+    string if any range overlaps an already-spent range (no override --
+    see SPENT_SEED_RANGES), else None. A pure function of its arguments --
+    no file I/O, no sim call -- so it is directly unit-testable without
+    going through main() or touching any real seed."""
+    for name, start, end in cell_ranges:
+        for spent in SPENT_SEED_RANGES:
+            if _overlaps(start, end, spent):
+                return (
+                    f"REFUSED: --{name} [{start}, {end}) overlaps an already-spent seed range "
+                    f"[{spent.start}, {spent.stop}) (docs/FINAL_PROTOCOL.md: spent seeds are "
+                    "1000-1199, 2000-2199, 5000-5199) -- a --held-out run must use a fresh "
+                    "range (e.g. 3000-3199) instead."
+                )
+    return None
+
+
+def check_final_range_single_use_guard(cell_ranges, access_log_path, override_reason, final_range=None):
+    """cell_ranges: [(name, start, end), ...]. Returns a REFUSED message
+    string if any range overlaps `final_range` (default
+    FINAL_HELDOUT_SEED_RANGE, i.e. 3000-3199) AND `access_log_path` already
+    records a prior run touching it AND no override_reason was given,
+    else None (including when access_log_path has no prior record at all
+    -- "the first run is allowed").
+
+    The only file I/O here is a read of access_log_path -- no sim call, no
+    write -- so a caller can safely pass a throwaway final_range (e.g.
+    range(8000, 8010)) and a temp access_log_path to test this fully
+    in-process, including against a fabricated "prior run" entry, without
+    ever touching the real pipeline/runs/heldout_access.log or spending
+    any of the real 3000-3199 budget.
+    """
+    if final_range is None:
+        final_range = FINAL_HELDOUT_SEED_RANGE
+    touches_final_range = any(_overlaps(start, end, final_range) for _, start, end in cell_ranges)
+    if not touches_final_range or override_reason is not None:
+        return None
+    prior = _prior_runs_touching_range(access_log_path, final_range)
+    if not prior:
+        return None
+    return (
+        f"REFUSED: seeds {final_range.start}-{final_range.stop - 1} are the final held-out range "
+        "(docs/FINAL_PROTOCOL.md: 'used once. No rule, prompt, gate or selection change after the "
+        f"first look.'), and {access_log_path} already records {len(prior)} prior run(s) touching "
+        f"it (most recent: {prior[-1].get('ts')}, rule_id={prior[-1].get('rule_id')!r}). Pass "
+        "--override-reason \"...\" to proceed anyway (recorded in the log for audit)."
+    )
+
+
+def _prior_runs_touching_range(access_log_path, target_range):
+    """Every prior --held-out entry in `access_log_path` (if it exists)
+    whose cell_b_seeds or cell_c_seeds overlaps `target_range`. Read-only:
+    never writes, never touches the real log unless the caller's own
+    access_log_path points at it."""
+    if not os.path.exists(access_log_path):
+        return []
+    hits = []
+    with open(access_log_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            for key in ("cell_b_seeds", "cell_c_seeds"):
+                seeds = entry.get(key)
+                if seeds and _overlaps(seeds[0], seeds[1], target_range):
+                    hits.append(entry)
+                    break
+    return hits
 
 
 def _grid_search_mildest_passing_rule(target_class, source_report_ids):
@@ -282,6 +384,13 @@ def main():
     p.add_argument("--cell-c-start", type=int, default=None)
     p.add_argument("--cell-c-end", type=int, default=None)
     p.add_argument("--actor", default="pipeline-evaluate-heldout")
+    p.add_argument("--access-log-path", default=ACCESS_LOG_PATH,
+                    help="path to the held-out access log (default: pipeline/runs/heldout_access.log). "
+                         "Tests should point this at a temp path so the real log is never touched.")
+    p.add_argument("--override-reason", default=None,
+                    help="required to run --held-out a second time against seeds that already "
+                         "touch the final held-out range 3000-3199 (docs/FINAL_PROTOCOL.md: "
+                         "'used once'); recorded in the access log for audit.")
     args = p.parse_args()
 
     if args.held_out and args.dev:
@@ -330,6 +439,19 @@ def main():
     rule_label = accepted_data.get("label")
     rule = Rule.model_validate(accepted_data["rule"])
 
+    if not args.dev:
+        cell_ranges = (("cell-b", cell_b_start, cell_b_end), ("cell-c", cell_c_start, cell_c_end))
+
+        refusal = check_spent_seed_guard(cell_ranges)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
+
+        refusal = check_final_range_single_use_guard(cell_ranges, args.access_log_path, args.override_reason)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
+
     dev_banner = "DEV RUN -- seeds 5000-5199, not a held-out measurement" if args.dev else None
     if dev_banner:
         print(dev_banner)
@@ -355,13 +477,15 @@ def main():
 
     os.makedirs(RUNS_DIR, exist_ok=True)
     if not args.dev:
-        with open(ACCESS_LOG_PATH, "a") as f:
+        os.makedirs(os.path.dirname(os.path.abspath(args.access_log_path)) or ".", exist_ok=True)
+        with open(args.access_log_path, "a") as f:
             f.write(json.dumps({
                 "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "actor": args.actor,
                 "rule_id": rule.rule_id,
                 "cell_b_seeds": [cell_b_seeds.start, cell_b_seeds.stop],
                 "cell_c_seeds": [cell_c_seeds.start, cell_c_seeds.stop],
+                "override_reason": args.override_reason,
             }) + "\n")
 
     target_class = _class_value(rule.object_class)

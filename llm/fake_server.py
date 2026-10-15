@@ -146,6 +146,16 @@ def _mismatched_class_reply(source_ids, real_class, rule_id):
     })
 
 
+# Hygiene: tests bind port 0 (FAKE_SERVER_PORT=0) so an OS-assigned, always-
+# free ephemeral port is used instead of a fixed one -- a fixed port
+# collides with another concurrent test run (this suite or any other
+# process) or a leftover orphaned server. Default 8000 preserves this
+# script's own documented standalone behavior when run by hand. The actual
+# bound port is written to FAKE_SERVER_PORT_FILE (if set) once bound, so a
+# test harness started with port 0 can discover which port it actually got.
+FAKE_SERVER_PORT = int(os.environ.get("FAKE_SERVER_PORT", "8000"))
+FAKE_SERVER_PORT_FILE = os.environ.get("FAKE_SERVER_PORT_FILE")
+
 ALWAYS_GOOD = os.environ.get("FAKE_ALWAYS_GOOD") == "1"
 ALWAYS_BAD = os.environ.get("FAKE_ALWAYS_BAD") == "1"
 HTTP_STATUS = int(os.environ.get("FAKE_HTTP_STATUS", "200"))
@@ -268,6 +278,10 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"fake_server modes: ALWAYS_GOOD={ALWAYS_GOOD} ALWAYS_BAD={ALWAYS_BAD} HTTP_STATUS={HTTP_STATUS} EMPTY_CONTENT={EMPTY_CONTENT} SLEEP_S={SLEEP_S} SCRIPT={SCRIPT}")
-    server = HTTPServer(("localhost", 8000), Handler)
-    print("fake_server listening on http://localhost:8000/v1/chat/completions")
+    server = HTTPServer(("localhost", FAKE_SERVER_PORT), Handler)
+    actual_port = server.server_address[1]
+    if FAKE_SERVER_PORT_FILE:
+        with open(FAKE_SERVER_PORT_FILE, "w") as f:
+            f.write(str(actual_port))
+    print(f"fake_server listening on http://localhost:{actual_port}/v1/chat/completions")
     server.serve_forever()

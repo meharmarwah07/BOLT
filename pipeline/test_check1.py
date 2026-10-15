@@ -13,9 +13,9 @@ Run with:
 import datetime as dt
 import json
 import os
-import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -38,7 +38,6 @@ from rules import lifecycle
 from rules.schema import Rule
 import rules.limits as rules_limits
 
-PORT = 8000
 TRAIN_SEEDS = range(30)
 # Measured safe for glass_jar by an earlier audit (sim/STATUS.md): mean
 # min holding grip for glass_jar is ~17-20N depending on accel, so 20N
@@ -59,48 +58,49 @@ TRAIN_SEEDS = range(30)
 GOOD_GLASS_JAR = dict(grip_force_min_n=20.0, carry_accel_max_ms2=1.0)
 
 
-def _port_open(port=PORT):
-    with socket.socket() as s:
-        s.settimeout(0.2)
-        try:
-            s.connect(("localhost", port))
-            return True
-        except OSError:
-            return False
-
-
-def _wait_for_port(port=PORT, timeout=5):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _port_open(port):
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def _wait_for_port_free(port=PORT, timeout=5):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not _port_open(port):
-            return True
-        time.sleep(0.05)
-    return False
+def _start_fake_server(extra_env=None, timeout=15):
+    """Start fake_server.py on an OS-assigned ephemeral port (FAKE_SERVER_
+    PORT=0), discovered via a temp port file -- hygiene: a fixed port
+    number collides with another concurrent run of this suite, a
+    concurrently-run different suite, or a leftover orphaned server; an
+    OS-assigned port does not. Returns (process, port)."""
+    fd, port_file = tempfile.mkstemp(prefix="fake_server_port_")
+    os.close(fd)
+    os.remove(port_file)  # fake_server.py creates it fresh, once actually bound
+    env = {**os.environ, **(extra_env or {}), "FAKE_SERVER_PORT": "0", "FAKE_SERVER_PORT_FILE": port_file}
+    proc = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=LLM_DIR, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if os.path.exists(port_file):
+                with open(port_file) as f:
+                    content = f.read().strip()
+                if content:
+                    return proc, int(content)
+            if proc.poll() is not None:
+                raise RuntimeError(f"fake_server.py exited early (rc={proc.returncode})")
+            time.sleep(0.02)
+        proc.terminate()
+        proc.wait(timeout=3)
+        raise RuntimeError("fake_server.py never wrote its port file")
+    finally:
+        if os.path.exists(port_file):
+            os.remove(port_file)
 
 
 def _stop_server(server):
-    """Terminate a fake_server.py subprocess and wait for its port to
-    actually free up -- without this, the next test's _wait_for_port can
-    lose a race against this OS's own socket-release delay."""
     server.terminate()
     try:
         server.wait(timeout=3)
     except subprocess.TimeoutExpired:
         server.kill()
         server.wait()
-    _wait_for_port_free()
 
 
-def _fetch_log(port=PORT):
+def _fetch_log(port):
     with urllib.request.urlopen(f"http://localhost:{port}/__log__", timeout=2) as resp:
         return json.loads(resp.read())
 
@@ -108,13 +108,9 @@ def _fetch_log(port=PORT):
 def _start_round1_insufficient_round2_strong_server():
     """Round 1's 3 requests get the well-formed-but-insufficient glass_jar
     reply (14N/2.5); request 4 onward (round 2) gets the measured-sufficient
-    one (24N/1.0, llm/fake_server.py's "strong")."""
+    one (24N/1.0, llm/fake_server.py's "strong"). Returns (process, port)."""
     script = [{"content": "good"}] * loop_mod.CANDIDATES_PER_ROUND + [{"content": "strong"}]
-    return subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=LLM_DIR,
-        env={**os.environ, "FAKE_SCRIPT": json.dumps(script)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    return _start_fake_server({"FAKE_SCRIPT": json.dumps(script)})
 
 
 def _rule(**overrides):
@@ -263,6 +259,202 @@ def test_heldout_refuses_without_rule_json():
     return True, ""
 
 
+def test_spent_seed_guard_refuses_each_spent_range():
+    """Pure unit test of evaluate_heldout.check_spent_seed_guard -- no
+    subprocess, no file I/O, no seed touched. Each already-spent range
+    (docs/FINAL_PROTOCOL.md: 1000-1199, 2000-2199, 5000-5199) must be
+    refused; a throwaway, never-reserved range (8000-8010) must not."""
+    for start, end in ((1000, 1010), (2000, 2010), (5000, 5010)):
+        refusal = evaluate_heldout_mod.check_spent_seed_guard([("cell-b", start, end)])
+        if refusal is None:
+            return False, f"expected a refusal for spent range [{start}, {end})"
+        if "REFUSED" not in refusal:
+            return False, f"expected 'REFUSED' in the message, got {refusal!r}"
+
+    refusal = evaluate_heldout_mod.check_spent_seed_guard([("cell-b", 8000, 8010), ("cell-c", 8100, 8110)])
+    if refusal is not None:
+        return False, f"expected no refusal for an unreserved throwaway range, got {refusal!r}"
+    return True, ""
+
+
+def test_final_range_single_use_guard_pure():
+    """Pure unit test of evaluate_heldout.check_final_range_single_use_guard
+    -- no subprocess, no sim call, and (per safety) never exercised against
+    the real FINAL_HELDOUT_SEED_RANGE (3000-3199) except to confirm an EMPTY
+    log allows the first run, which touches no seed and spends no budget.
+    The refuse/override branches are tested against a throwaway substitute
+    range (8000-8010) instead, so this test can be run any number of times
+    without ever being mistaken for a real use of 3000-3199."""
+    throwaway_range = range(8000, 8010)
+    tmp_log = os.path.join(HERE, "runs", "test_final_range_guard_access.log")
+    if os.path.exists(tmp_log):
+        os.remove(tmp_log)
+    try:
+        # Empty/missing log -- first run is allowed, against the throwaway range.
+        cell_ranges = [("cell-b", 8000, 8005), ("cell-c", 8100, 8110)]
+        refusal = evaluate_heldout_mod.check_final_range_single_use_guard(
+            cell_ranges, tmp_log, override_reason=None, final_range=throwaway_range,
+        )
+        if refusal is not None:
+            return False, f"expected the first (empty-log) run to be allowed, got {refusal!r}"
+
+        # ... and against the REAL default final_range too -- still only
+        # asserting "allowed", never "refused", so this never implies a
+        # real 3000-3199 run happened; no sim call is made either way.
+        real_range_cells = [("cell-b", 3000, 3010)]
+        refusal = evaluate_heldout_mod.check_final_range_single_use_guard(
+            real_range_cells, tmp_log, override_reason=None,
+        )
+        if refusal is not None:
+            return False, f"expected an empty log to allow a first run against the real range too, got {refusal!r}"
+
+        # A fabricated prior entry touching the throwaway range -- a second,
+        # un-overridden run must now be refused.
+        with open(tmp_log, "w") as f:
+            f.write(json.dumps({
+                "ts": "2026-01-01T00:00:00+00:00", "actor": "test", "rule_id": "r_prior",
+                "cell_b_seeds": [8000, 8005], "cell_c_seeds": [8100, 8110], "override_reason": None,
+            }) + "\n")
+        refusal = evaluate_heldout_mod.check_final_range_single_use_guard(
+            cell_ranges, tmp_log, override_reason=None, final_range=throwaway_range,
+        )
+        if refusal is None:
+            return False, "expected the second run (prior entry on record) to be refused"
+        if "REFUSED" not in refusal or "override-reason" not in refusal:
+            return False, f"expected 'REFUSED' and a mention of --override-reason, got {refusal!r}"
+
+        # Same situation, but with an override reason -- allowed.
+        refusal = evaluate_heldout_mod.check_final_range_single_use_guard(
+            cell_ranges, tmp_log, override_reason="infra error on first attempt", final_range=throwaway_range,
+        )
+        if refusal is not None:
+            return False, f"expected --override-reason to allow the second run, got {refusal!r}"
+
+        # A range that doesn't touch final_range at all is always allowed,
+        # prior entry or not.
+        safe_cells = [("cell-b", 9000, 9010)]
+        refusal = evaluate_heldout_mod.check_final_range_single_use_guard(
+            safe_cells, tmp_log, override_reason=None, final_range=throwaway_range,
+        )
+        if refusal is not None:
+            return False, f"expected a range outside final_range to never be refused, got {refusal!r}"
+        return True, ""
+    finally:
+        if os.path.exists(tmp_log):
+            os.remove(tmp_log)
+
+
+def test_evaluate_heldout_refuses_spent_seeds_end_to_end():
+    """Subprocess-level: --held-out against an already-spent range (here,
+    1000-1010, inside the permanently-spent 1000-1199) must be refused
+    before any seed is touched -- safe to run any number of times since
+    refusal happens before writing the access log or calling into the
+    simulator at all. Uses a throwaway --access-log-path so the real log
+    is provably untouched."""
+    rule_json = os.path.join(HERE, "runs", "test_spent_guard_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_spent_guard_audit.jsonl")
+    tmp_access_log = os.path.join(HERE, "runs", "test_spent_guard_access.log")
+    for path in (tmp_access_log,):
+        if os.path.exists(path):
+            os.remove(path)
+    _write_demo_accepted_rule(rule_json, audit_path, is_stub=True)
+
+    real_access_log = os.path.join(HERE, "runs", "heldout_access.log")
+    real_before = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-json", rule_json, "--audit-path", audit_path,
+            "--access-log-path", tmp_access_log,
+            "--cell-b-start", "1000", "--cell-b-end", "1010",
+            "--cell-c-start", "1100", "--cell-c-end", "1110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=30,
+    )
+    real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    if result.returncode == 0:
+        return False, f"expected a non-zero exit for a spent-range --held-out run, got 0 (stdout={result.stdout!r})"
+    if "REFUSED" not in result.stderr or "spent" not in result.stderr:
+        return False, f"expected a REFUSED/'spent' message on stderr, got {result.stderr!r}"
+    if real_before != real_after:
+        return False, "the REAL heldout_access.log changed even though the run was refused"
+    if os.path.exists(tmp_access_log):
+        return False, "the throwaway access log was written even though the run was refused before any write"
+    return True, ""
+
+
+def test_evaluate_heldout_dev_mode_unaffected_by_new_guards():
+    """--dev mode must not be touched by the spent-seed/single-use guards
+    at all (they only apply to --held-out) -- regression-checked here by
+    re-running the existing --dev scenario and confirming it still passes
+    with the new guards wired in."""
+    rule_json = os.path.join(HERE, "runs", "test_dev_unaffected_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_dev_unaffected_audit.jsonl")
+    rule = _write_demo_accepted_rule(rule_json, audit_path, is_stub=True)
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--dev",
+            "--rule-json", rule_json, "--audit-path", audit_path,
+            "--cell-b-start", "5000", "--cell-b-end", "5005",
+            "--cell-c-start", "5100", "--cell-c-end", "5105",
+        ],
+        # 120s, not 60: matches the existing dev-mode test's own timeout --
+        # every evaluate_heldout.py invocation runs an expensive grid
+        # search (GRID_RESOLUTION^2 check1() calls) regardless of mode.
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        return False, f"evaluate_heldout.py --dev failed (rc={result.returncode}): {result.stderr.strip()!r}"
+    if "REFUSED" in result.stderr:
+        return False, f"expected --dev to be unaffected by the new guards; got stderr={result.stderr!r}"
+    json_path = os.path.join(HERE, "runs", f"heldout_eval_{rule.rule_id}_DEV.json")
+    if not os.path.exists(json_path):
+        return False, f"expected {json_path} to be written"
+    return True, ""
+
+
+def test_evaluate_heldout_custom_access_log_path_used():
+    """--access-log-path is honored end to end: a --held-out run against a
+    safe, never-reserved throwaway range (9000-9010/9100-9110 -- outside
+    every spent range and the final 3000-3199 range) writes to the GIVEN
+    path, not pipeline/runs/heldout_access.log, which must stay untouched."""
+    rule_json = os.path.join(HERE, "runs", "test_custom_log_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_custom_log_audit.jsonl")
+    tmp_access_log = os.path.join(HERE, "runs", "test_custom_access.log")
+    if os.path.exists(tmp_access_log):
+        os.remove(tmp_access_log)
+    _write_demo_accepted_rule(rule_json, audit_path, is_stub=True)
+
+    real_access_log = os.path.join(HERE, "runs", "heldout_access.log")
+    real_before = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-json", rule_json, "--audit-path", audit_path,
+            "--access-log-path", tmp_access_log,
+            "--cell-b-start", "9000", "--cell-b-end", "9010",
+            "--cell-c-start", "9100", "--cell-c-end", "9110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+    )
+    real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    if result.returncode != 0:
+        return False, f"expected a clean run on an unreserved throwaway range; rc={result.returncode} stderr={result.stderr.strip()!r}"
+    if not os.path.exists(tmp_access_log):
+        return False, f"expected {tmp_access_log} to be written"
+    if real_before != real_after:
+        return False, "the REAL heldout_access.log changed even though --access-log-path pointed elsewhere"
+    with open(tmp_access_log) as f:
+        entry = json.loads(f.readline())
+    if entry.get("cell_b_seeds") != [9000, 9010]:
+        return False, f"expected the custom log entry to record the run's own seeds, got {entry}"
+    return True, ""
+
+
 def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=20.0, accel=1.0):
     """Hand-builds a CHECK1_PASSED rule + matching audit log + accepted_rule.json
     (the same wrapper shape loop.py writes), so evaluate_heldout.py tests don't
@@ -367,16 +559,17 @@ def test_loop_no_safe_rule_for_unfixable_seeds():
     every round should fail check1 the same way, every round, and the loop
     must exhaust to NoSafeRule rather than loop forever or crash.
     """
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=LLM_DIR,
-        env={**os.environ, "FAKE_ALWAYS_GOOD": "1"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not _wait_for_port():
-            return False, "fake_server.py never started"
+        server, port = _start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"fake_server.py never started ({e})"
 
-        os.environ["FLEET_LLM_BASE_URL"] = f"http://localhost:{PORT}/v1"
+    # loop_mod.solver.BASE_URL (solver.py's module-level constant, bound at
+    # import time) is what solve() actually reads -- setting os.environ
+    # after import has no effect in-process, unlike a fresh subprocess.
+    original_base_url = loop_mod.solver.BASE_URL
+    loop_mod.solver.BASE_URL = f"http://localhost:{port}/v1"
+    try:
         # Real sim trials (run_trial + monitor), train seeds only -- see
         # loop.real_failure_reports' docstring.
         failure_reports = loop_mod.real_failure_reports("glass_jar", range(5))
@@ -396,7 +589,7 @@ def test_loop_no_safe_rule_for_unfixable_seeds():
             return False, f"expected 9 attempts (3 rounds x 3 candidates), got {len(result.attempts)}"
         return True, ""
     finally:
-        os.environ.pop("FLEET_LLM_BASE_URL", None)
+        loop_mod.solver.BASE_URL = original_base_url
         _stop_server(server)
 
 
@@ -404,11 +597,10 @@ def _run_round1_insufficient_round2_strong():
     """Shared setup for the next three tests: round 1 (3 candidates) all
     get the insufficient reply, round 2 (3 candidates) all get the
     sufficient one. Returns (result, audit_path, server_log)."""
-    server = _start_round1_insufficient_round2_strong_server()
+    server, port = _start_round1_insufficient_round2_strong_server()
+    original_base_url = loop_mod.solver.BASE_URL
+    loop_mod.solver.BASE_URL = f"http://localhost:{port}/v1"
     try:
-        if not _wait_for_port():
-            raise RuntimeError("fake_server.py never started")
-        os.environ["FLEET_LLM_BASE_URL"] = f"http://localhost:{PORT}/v1"
         failure_reports = loop_mod.real_failure_reports("glass_jar", range(5))
         audit_path = os.path.join(HERE, "runs", "test_loop_round2_audit.jsonl")
         if os.path.exists(audit_path):
@@ -428,10 +620,10 @@ def _run_round1_insufficient_round2_strong():
             max_rounds=3, candidates_per_round=3, min_interval_s=0.0,
             check1_version=1,
         )
-        server_log = _fetch_log()
+        server_log = _fetch_log(port)
         return result, audit_path, server_log
     finally:
-        os.environ.pop("FLEET_LLM_BASE_URL", None)
+        loop_mod.solver.BASE_URL = original_base_url
         _stop_server(server)
 
 
@@ -675,14 +867,11 @@ def test_sim_crush_limits_match_rules_limits():
 
 def test_no_api_key_in_loop_output():
     secret = "sk-test-SECRET-should-never-leak-99887766"
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=LLM_DIR,
-        env={**os.environ, "FAKE_ALWAYS_GOOD": "1"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not _wait_for_port():
-            return False, "fake_server.py never started"
+        server, port = _start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"fake_server.py never started ({e})"
+    try:
         result = subprocess.run(
             [
                 sys.executable, os.path.join(HERE, "loop.py"),
@@ -692,7 +881,7 @@ def test_no_api_key_in_loop_output():
                 # 4.0s/100-seed defaults would make this leak-check slow).
                 "--check1-seeds", "10", "--min-interval-s", "0.0",
             ],
-            cwd=HERE, env={**os.environ, "FLEET_LLM_API_KEY": secret, "FLEET_LLM_BASE_URL": f"http://localhost:{PORT}/v1"},
+            cwd=HERE, env={**os.environ, "FLEET_LLM_API_KEY": secret, "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1"},
             capture_output=True, text=True, timeout=60,
         )
         if secret in result.stdout or secret in result.stderr:
@@ -1015,6 +1204,11 @@ UNIT_TESTS = [
     ("check1 serial == parallel", test_serial_equals_parallel),
     ("evaluate_heldout.py refuses without --held-out", test_heldout_guard_refuses_without_flag),
     ("evaluate_heldout.py refuses when accepted_rule.json is missing", test_heldout_refuses_without_rule_json),
+    ("spent-seed guard (pure): refuses each spent range, allows a throwaway one", test_spent_seed_guard_refuses_each_spent_range),
+    ("final-range single-use guard (pure): first run allowed, second refused, override allows", test_final_range_single_use_guard_pure),
+    ("evaluate_heldout.py refuses --held-out on an already-spent range", test_evaluate_heldout_refuses_spent_seeds_end_to_end),
+    ("evaluate_heldout.py --dev is unaffected by the new spent/single-use guards", test_evaluate_heldout_dev_mode_unaffected_by_new_guards),
+    ("evaluate_heldout.py --access-log-path is honored and the real log stays untouched", test_evaluate_heldout_custom_access_log_path_used),
     ("evaluate_heldout.py shows both Cell C scenarios, ceiling row, stub label", test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label),
     ("loop returns NoSafeRule for an unfixable seed set", test_loop_no_safe_rule_for_unfixable_seeds),
     ("feedback reaches the second request", test_feedback_reaches_second_request),

@@ -12,11 +12,21 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PORT = 8000
+
+
+def _free_port():
+    """A port very likely free right now, for the connection-refused case
+    (no server bound here at all) -- not used to start fake_server.py
+    itself, which always picks its own ephemeral port independently (see
+    start_fake_server)."""
+    with socket.socket() as s:
+        s.bind(("localhost", 0))
+        return s.getsockname()[1]
 
 
 def port_is_open(port, host="localhost"):
@@ -29,48 +39,69 @@ def port_is_open(port, host="localhost"):
             return False
 
 
-def wait_for_port(port, timeout=5):
-    start = time.time()
-    while time.time() - start < timeout:
-        if port_is_open(port):
-            return True
-        time.sleep(0.05)
-    return False
+def start_fake_server(extra_env=None, timeout=15):
+    """Start fake_server.py on an OS-assigned ephemeral port (FAKE_SERVER_
+    PORT=0), discovered via a temp port file -- hygiene: a fixed port
+    number collides with another concurrent run of this suite, a
+    concurrently-run different suite, or a leftover orphaned server; an
+    OS-assigned port does not. Returns (process, port)."""
+    fd, port_file = tempfile.mkstemp(prefix="fake_server_port_")
+    os.close(fd)
+    os.remove(port_file)  # fake_server.py creates it fresh, once actually bound
+    env = {**os.environ, **(extra_env or {}), "FAKE_SERVER_PORT": "0", "FAKE_SERVER_PORT_FILE": port_file}
+    proc = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if os.path.exists(port_file):
+                with open(port_file) as f:
+                    content = f.read().strip()
+                if content:
+                    return proc, int(content)
+            if proc.poll() is not None:
+                raise RuntimeError(f"fake_server.py exited early (rc={proc.returncode})")
+            time.sleep(0.02)
+        proc.terminate()
+        proc.wait(timeout=3)
+        raise RuntimeError("fake_server.py never wrote its port file")
+    finally:
+        if os.path.exists(port_file):
+            os.remove(port_file)
 
 
-def wait_for_port_free(port, timeout=5):
-    start = time.time()
-    while time.time() - start < timeout:
-        if not port_is_open(port):
-            return True
-        time.sleep(0.05)
-    return False
+def stop_fake_server(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
-def fetch_log():
-    with urllib.request.urlopen(f"http://localhost:{PORT}/__log__", timeout=2) as resp:
+def fetch_log(port):
+    with urllib.request.urlopen(f"http://localhost:{port}/__log__", timeout=2) as resp:
         return json.loads(resp.read())
 
 
 def run_case(name, start_server, server_env, solver_env, check, expected_requests=None, extra_check=None):
     server = None
     if start_server:
-        env = {**os.environ, **server_env}
-        server = subprocess.Popen(
-            [sys.executable, "fake_server.py"], cwd=HERE, env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if not wait_for_port(PORT):
-            print(f"FAIL {name}: stub server never started")
-            server.terminate()
+        try:
+            server, port = start_fake_server(server_env)
+        except RuntimeError as e:
+            print(f"FAIL {name}: stub server never started ({e})")
             return False
     else:
-        if not wait_for_port_free(PORT):
-            print(f"FAIL {name}: port {PORT} is unexpectedly occupied, cannot test connection-refused")
-            return False
+        port = _free_port()  # nothing is listening here -- solver.py's connection to it must be refused
 
     try:
-        env = {**os.environ, **solver_env, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        env = {
+            **os.environ, **solver_env, "FLEET_LLM_RETRY_SLEEP_S": "0",
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
+        }
         result = subprocess.run(
             [sys.executable, "solver.py"], cwd=HERE, env=env,
             capture_output=True, text=True, timeout=30,
@@ -80,7 +111,7 @@ def run_case(name, start_server, server_env, solver_env, check, expected_request
         log = None
         if ok and start_server:
             try:
-                log = fetch_log()
+                log = fetch_log(port)
             except Exception as e:
                 ok, reason = False, f"could not fetch request log: {e}"
 
@@ -97,13 +128,7 @@ def run_case(name, start_server, server_env, solver_env, check, expected_request
         return ok
     finally:
         if server is not None:
-            server.terminate()
-            try:
-                server.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait()
-            wait_for_port_free(PORT)
+            stop_fake_server(server)
 
 
 def accepted(result):
@@ -408,17 +433,13 @@ def test_retry_after_seconds_parsing():
 
 
 def test_429_retry_after_is_honoured():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
     env = {"FAKE_SCRIPT": json.dumps([{"status": 429, "retry_after": 1}, {"finish_reason": "stop", "content": "good"}])}
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, **env},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
-        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        server, port = start_fake_server(env)
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
+        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1"}
         start = time.perf_counter()
         result = subprocess.run(
             [sys.executable, "solver.py"], cwd=HERE, env=solver_env,
@@ -429,32 +450,21 @@ def test_429_retry_after_is_honoured():
             return False, f"returncode={result.returncode} stderr={result.stderr.strip()[:300]!r}"
         if elapsed < 1.0:
             return False, f"expected >= 1s sleep honouring Retry-After=1, took {elapsed:.2f}s"
-        log = fetch_log()
+        log = fetch_log(port)
         if log["count"] != 2:
             return False, f"expected 2 requests, server saw {log['count']}"
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 def test_reasoning_effort_sent_only_when_set():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, "FAKE_ALWAYS_GOOD": "1"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
-
-        base_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        server, port = start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
+        base_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1"}
 
         env_unset = dict(base_env)
         env_unset.pop("FLEET_LLM_REASONING_EFFORT", None)
@@ -464,7 +474,7 @@ def test_reasoning_effort_sent_only_when_set():
         )
         if result.returncode != 0:
             return False, f"(unset) returncode={result.returncode} stderr={result.stderr.strip()[:300]!r}"
-        log = fetch_log()
+        log = fetch_log(port)
         if log["reasoning_effort"][-1] is not None:
             return False, f"expected no reasoning_effort sent when unset, got {log['reasoning_effort'][-1]!r}"
 
@@ -476,32 +486,25 @@ def test_reasoning_effort_sent_only_when_set():
         )
         if result.returncode != 0:
             return False, f"(set) returncode={result.returncode} stderr={result.stderr.strip()[:300]!r}"
-        log = fetch_log()
+        log = fetch_log(port)
         if log["reasoning_effort"][-1] != "low":
             return False, f"expected reasoning_effort='low' sent, got {log['reasoning_effort'][-1]!r}"
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 def test_api_key_never_appears_in_solver_output():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
     secret = "sk-test-SECRET-should-never-leak-99887766"
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, "FAKE_HTTP_STATUS": "400"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
-        env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_LLM_API_KEY": secret}
+        server, port = start_fake_server({"FAKE_HTTP_STATUS": "400"})
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
+        env = {
+            **os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_LLM_API_KEY": secret,
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
+        }
         result = subprocess.run(
             [sys.executable, "solver.py"], cwd=HERE, env=env,
             capture_output=True, text=True, timeout=30,
@@ -510,13 +513,7 @@ def test_api_key_never_appears_in_solver_output():
             return False, "API key leaked into solver.py stdout/stderr"
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 def test_rule_id_always_overwritten_and_unique():
@@ -526,15 +523,11 @@ def test_rule_id_always_overwritten_and_unique():
     solve() twice in one process against the stub (whose own reply ids are
     already unique per request, r_fake_0001/r_fake_0002, but that alone
     isn't the thing under test: it's solve()'s own overwrite)."""
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env={**os.environ, "FAKE_ALWAYS_GOOD": "1"},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
+        server, port = start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
         snippet = (
             "import json, solver\n"
             "reports = [{'report_id': 'fr_0001', 'object_class': 'glass_jar', "
@@ -544,7 +537,7 @@ def test_rule_id_always_overwritten_and_unique():
             "r2 = solver.solve(reports)\n"
             "print(json.dumps({'id1': r1.rule_id, 'id2': r2.rule_id}))\n"
         )
-        env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0"}
+        env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1"}
         result = subprocess.run(
             [sys.executable, "-c", snippet], cwd=HERE, env=env,
             capture_output=True, text=True, timeout=30,
@@ -566,13 +559,7 @@ def test_rule_id_always_overwritten_and_unique():
             return False, f"the stub's own id leaked through unmodified: {ids}"
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 UNIT_TESTS = [
@@ -593,10 +580,6 @@ UNIT_TESTS = [
 
 
 if __name__ == "__main__":
-    if port_is_open(PORT):
-        print(f"ABORT: port {PORT} is already in use before tests started. Stop whatever is using it and retry.")
-        sys.exit(2)
-
     results = [run_case(*case) for case in CASES]
     results += [run_unit(name, fn) for name, fn in UNIT_TESTS]
     passed = sum(results)

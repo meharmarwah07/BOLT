@@ -1,15 +1,14 @@
 """Tests for smoke_real.py and its fixtures. Run with: python test_smoke.py"""
 import json
 import os
-import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES_DIR = os.path.join(HERE, "fixtures")
 RUNS_DIR = os.path.join(HERE, "runs")
-PORT = 8000
 
 CONTRACTS_V0_REPORT_FIELDS = {
     "report_id", "cell_id", "owner_id", "object_class", "controller",
@@ -137,51 +136,61 @@ def test_scoring_function_hand_written_cases():
     return True, ""
 
 
-def port_is_open(port, host="localhost"):
-    with socket.socket() as s:
-        s.settimeout(0.2)
-        try:
-            s.connect((host, port))
-            return True
-        except OSError:
-            return False
-
-
-def wait_for_port(port, timeout=5):
-    start = time.time()
-    while time.time() - start < timeout:
-        if port_is_open(port):
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def wait_for_port_free(port, timeout=5):
-    start = time.time()
-    while time.time() - start < timeout:
-        if not port_is_open(port):
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def test_smoke_real_end_to_end_against_stub():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use, cannot start the stub"
-
-    server_env = {**os.environ, "FAKE_ALWAYS_GOOD": "1"}
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env=server_env,
+def start_fake_server(extra_env=None, timeout=15):
+    """Start fake_server.py on an OS-assigned ephemeral port (FAKE_SERVER_
+    PORT=0), discovered via a temp port file -- hygiene: a fixed port
+    number collides with another concurrent run of this suite, a
+    concurrently-run different suite, or a leftover orphaned server; an
+    OS-assigned port does not. Returns (process, port)."""
+    fd, port_file = tempfile.mkstemp(prefix="fake_server_port_")
+    os.close(fd)
+    os.remove(port_file)  # fake_server.py creates it fresh, once actually bound
+    env = {**os.environ, **(extra_env or {}), "FAKE_SERVER_PORT": "0", "FAKE_SERVER_PORT_FILE": port_file}
+    proc = subprocess.Popen(
+        [sys.executable, "fake_server.py"], cwd=HERE, env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if os.path.exists(port_file):
+                with open(port_file) as f:
+                    content = f.read().strip()
+                if content:
+                    return proc, int(content)
+            if proc.poll() is not None:
+                raise RuntimeError(f"fake_server.py exited early (rc={proc.returncode})")
+            time.sleep(0.02)
+        proc.terminate()
+        proc.wait(timeout=3)
+        raise RuntimeError("fake_server.py never wrote its port file")
+    finally:
+        if os.path.exists(port_file):
+            os.remove(port_file)
 
+
+def stop_fake_server(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def test_smoke_real_end_to_end_against_stub():
+    try:
+        server, port = start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
         os.makedirs(RUNS_DIR, exist_ok=True)
         before = set(os.listdir(RUNS_DIR))
 
-        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0"}
+        solver_env = {
+            **os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0",
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
+        }
         result = subprocess.run(
             [sys.executable, "smoke_real.py"], cwd=HERE, env=solver_env,
             capture_output=True, text=True, timeout=60,
@@ -200,28 +209,16 @@ def test_smoke_real_end_to_end_against_stub():
             return False, f"expected 18 records in {results_path}, got {len(data.get('records', []))}"
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 def test_run_metadata_and_no_api_key_leak():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
     secret = "sk-test-SECRET-should-never-leak-99887766"
-    server_env = {**os.environ, "FAKE_ALWAYS_GOOD": "1"}
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env=server_env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
-
+        server, port = start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
         os.makedirs(RUNS_DIR, exist_ok=True)
         before = set(os.listdir(RUNS_DIR))
 
@@ -231,6 +228,7 @@ def test_run_metadata_and_no_api_key_leak():
             "FLEET_MIN_INTERVAL_S": "0",
             "FLEET_LLM_API_KEY": secret,
             "FLEET_LLM_REASONING_EFFORT": "medium",
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
         }
         result = subprocess.run(
             [sys.executable, "smoke_real.py"], cwd=HERE, env=solver_env,
@@ -264,13 +262,7 @@ def test_run_metadata_and_no_api_key_leak():
             )
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 def test_first_attempt_and_after_retries_rates():
@@ -305,23 +297,21 @@ def test_first_attempt_and_after_retries_rates():
 
 
 def test_attempt_tracking_in_run_file_and_stdout():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
     # Default fake_server.py behaviour (no FAKE_* flags): the very first HTTP
     # request of the whole run is "bad", every later request is "good" -- so
     # exactly one of the 18 calls needs a retry.
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env=os.environ.copy(),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
-
+        server, port = start_fake_server()
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
         os.makedirs(RUNS_DIR, exist_ok=True)
         before = set(os.listdir(RUNS_DIR))
 
-        solver_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0"}
+        solver_env = {
+            **os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0",
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
+        }
         result = subprocess.run(
             [sys.executable, "smoke_real.py"], cwd=HERE, env=solver_env,
             capture_output=True, text=True, timeout=60,
@@ -356,28 +346,19 @@ def test_attempt_tracking_in_run_file_and_stdout():
             return False, "expected at least one retried call with the default fake_server bad-then-good behavior"
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 def test_min_interval_enforced_between_requests():
-    if port_is_open(PORT):
-        return False, f"port {PORT} is already in use"
-    server_env = {**os.environ, "FAKE_ALWAYS_GOOD": "1"}
-    server = subprocess.Popen(
-        [sys.executable, "fake_server.py"], cwd=HERE, env=server_env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     try:
-        if not wait_for_port(PORT):
-            return False, "stub server never started"
-
-        fast_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0"}
+        server, port = start_fake_server({"FAKE_ALWAYS_GOOD": "1"})
+    except RuntimeError as e:
+        return False, f"stub server never started ({e})"
+    try:
+        fast_env = {
+            **os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0",
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
+        }
         start = time.perf_counter()
         result = subprocess.run(
             [sys.executable, "smoke_real.py"], cwd=HERE, env=fast_env,
@@ -387,7 +368,10 @@ def test_min_interval_enforced_between_requests():
         if result.returncode != 0:
             return False, f"(fast) exited {result.returncode}: {result.stderr.strip()[:300]!r}"
 
-        slow_env = {**os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0.2"}
+        slow_env = {
+            **os.environ, "FLEET_LLM_RETRY_SLEEP_S": "0", "FLEET_MIN_INTERVAL_S": "0.2",
+            "FLEET_LLM_BASE_URL": f"http://localhost:{port}/v1",
+        }
         start = time.perf_counter()
         result = subprocess.run(
             [sys.executable, "smoke_real.py"], cwd=HERE, env=slow_env,
@@ -405,13 +389,7 @@ def test_min_interval_enforced_between_requests():
             )
         return True, ""
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait()
-        wait_for_port_free(PORT)
+        stop_fake_server(server)
 
 
 TESTS = [
