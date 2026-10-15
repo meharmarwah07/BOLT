@@ -321,6 +321,68 @@ def test_no_hidden_sim_numbers_in_prompt_files():
     return True, ""
 
 
+def test_fence_stripping_off_by_default():
+    from rule_check import parse_reply
+
+    fenced = '```json\n{"no_safe_rule": true, "reason": "x"}\n```'
+    env_before = os.environ.pop("FLEET_LLM_STRIP_FENCE", None)
+    try:
+        obj, err = parse_reply(fenced)
+    finally:
+        if env_before is not None:
+            os.environ["FLEET_LLM_STRIP_FENCE"] = env_before
+    if obj is not None:
+        return False, f"expected a fenced reply to be rejected by default (flag unset), got {obj}"
+    if err is None or "JSON" not in err:
+        return False, f"expected a JSON-parse error by default, got {err!r}"
+    return True, ""
+
+
+def test_fence_stripping_strips_one_clean_fence_when_enabled():
+    from rule_check import parse_reply
+
+    fenced = '```json\n{"no_safe_rule": true, "reason": "x"}\n```'
+    env_before = os.environ.get("FLEET_LLM_STRIP_FENCE")
+    os.environ["FLEET_LLM_STRIP_FENCE"] = "1"
+    try:
+        obj, err = parse_reply(fenced)
+    finally:
+        if env_before is None:
+            os.environ.pop("FLEET_LLM_STRIP_FENCE", None)
+        else:
+            os.environ["FLEET_LLM_STRIP_FENCE"] = env_before
+    if obj is None:
+        return False, f"expected the clean fence to be stripped and parsed; got err={err!r}"
+    if obj.reason != "x":
+        return False, f"expected reason='x', got {obj.reason!r}"
+    return True, ""
+
+
+def test_fence_stripping_still_rejects_malformed_json_when_enabled():
+    from rule_check import parse_reply
+
+    cases = [
+        '```json\n{"no_safe_rule": true, "reason": "x"\n```',  # malformed JSON inside a clean fence
+        '```json\n{"no_safe_rule": true, "reason": "x"}\n```\nextra trailing text',  # not a CLEAN fence
+        'leading text\n```json\n{"no_safe_rule": true, "reason": "x"}\n```',  # not a clean fence
+        '```\n{"no_safe_rule": true, "reason": "x"}\n```',  # fence has no "json" tag
+        '```json\n{"a": 1}\n```\n```json\n{"b": 2}\n```',  # more than one fence
+    ]
+    env_before = os.environ.get("FLEET_LLM_STRIP_FENCE")
+    os.environ["FLEET_LLM_STRIP_FENCE"] = "1"
+    try:
+        for text in cases:
+            obj, err = parse_reply(text)
+            if obj is not None:
+                return False, f"expected {text!r} to still fail closed with stripping enabled, got {obj}"
+    finally:
+        if env_before is None:
+            os.environ.pop("FLEET_LLM_STRIP_FENCE", None)
+        else:
+            os.environ["FLEET_LLM_STRIP_FENCE"] = env_before
+    return True, ""
+
+
 def test_retry_after_seconds_parsing():
     import solver as solver_mod
 
@@ -519,6 +581,9 @@ UNIT_TESTS = [
     ("system prompt limits match rules/limits.py", test_system_prompt_limits_match_rules_limits),
     ("no example uses object_class=glass_jar (anchoring risk)", test_examples_exclude_glass_jar),
     ("no hidden sim numbers (friction range, crush jitter) in prompt files", test_no_hidden_sim_numbers_in_prompt_files),
+    ("fence stripping is off by default", test_fence_stripping_off_by_default),
+    ("fence stripping strips exactly one clean fence when enabled", test_fence_stripping_strips_one_clean_fence_when_enabled),
+    ("fence stripping still rejects malformed/dirty input when enabled", test_fence_stripping_still_rejects_malformed_json_when_enabled),
     ("_retry_after_seconds parses/caps/defaults Retry-After", test_retry_after_seconds_parsing),
     ("HTTP 429 Retry-After is honoured and retried", test_429_retry_after_is_honoured),
     ("reasoning_effort is sent only when FLEET_LLM_REASONING_EFFORT is set", test_reasoning_effort_sent_only_when_set),
