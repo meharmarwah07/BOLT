@@ -477,13 +477,24 @@ if __name__ == "__main__":
               f"grip_force_min_n={result.check1_passed_rule.grip_force_min_n} "
               f"carry_accel_max_ms2={result.check1_passed_rule.carry_accel_max_ms2}"
               + (f"  [{label}]" if label else ""))
+        accepted_payload = {
+            "label": label,
+            "is_stub": is_stub,
+            "rule": result.check1_passed_rule.model_dump(mode="json"),
+        }
         accepted_path = os.path.join(RUNS_DIR, "accepted_rule.json")
         with open(accepted_path, "w") as f:
-            json.dump({
-                "label": label,
-                "is_stub": is_stub,
-                "rule": result.check1_passed_rule.model_dump(mode="json"),
-            }, f, indent=2)
+            json.dump(accepted_payload, f, indent=2)
         print(f"wrote {accepted_path}" + (f" (labeled {label!r})" if label else ""))
+        # accepted_rule.json above is a fixed name -- a later run that also
+        # reaches CHECK1_PASSED overwrites it. Multi-rule evaluation
+        # (docs/SUCCESS_CRITERION.md item B: every gate-passing rule from
+        # every run is evaluated, not just the latest) needs each run's
+        # own rule kept around under a unique name, so it's also written
+        # here, unconditionally, alongside the fixed-name file above.
+        accepted_path_unique = os.path.join(RUNS_DIR, f"accepted_rule_{timestamp}.json")
+        with open(accepted_path_unique, "w") as f:
+            json.dump(accepted_payload, f, indent=2)
+        print(f"wrote {accepted_path_unique}")
     else:
         print(f"\nNO_SAFE_RULE: {result.no_safe_rule.reason}")

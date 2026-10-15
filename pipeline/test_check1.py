@@ -455,12 +455,148 @@ def test_evaluate_heldout_custom_access_log_path_used():
     return True, ""
 
 
-def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=20.0, accel=1.0):
+def test_multi_rule_rejects_rule_file_audit_path_count_mismatch():
+    """2 --rule-file but only 1 --audit-path must be refused before any
+    file is even read -- cheap and safe to run unconditionally."""
+    rule_json = os.path.join(HERE, "runs", "test_mismatch_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_mismatch_audit.jsonl")
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_json, "--rule-file", rule_json,
+            "--audit-path", audit_path,
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode == 0:
+        return False, f"expected a non-zero exit on count mismatch, got 0 (stdout={result.stdout!r})"
+    if "REFUSED" not in result.stderr or "--audit-path" not in result.stderr:
+        return False, f"expected a REFUSED/'--audit-path' message on stderr, got {result.stderr!r}"
+    return True, ""
+
+
+def test_multi_rule_evaluates_all_rules_in_one_invocation():
+    """docs/SUCCESS_CRITERION.md item B/C: 2 gate-passing rules, evaluated
+    together in ONE --held-out invocation, on a throwaway range (never
+    1000-1199/2000-2199/3000-3199/5000-5199) -- shared baselines, ONE
+    access-log entry listing both rule_ids, a per-rule criterion_d verdict,
+    and the Bonferroni threshold 0.05/k for k=2."""
+    rule_a_json = os.path.join(HERE, "runs", "test_multi_rule_a.json")
+    rule_b_json = os.path.join(HERE, "runs", "test_multi_rule_b.json")
+    audit_a = os.path.join(HERE, "runs", "test_multi_rule_a_audit.jsonl")
+    audit_b = os.path.join(HERE, "runs", "test_multi_rule_b_audit.jsonl")
+    tmp_access_log = os.path.join(HERE, "runs", "test_multi_rule_access.log")
+    if os.path.exists(tmp_access_log):
+        os.remove(tmp_access_log)
+    rule_a = _write_demo_accepted_rule(rule_a_json, audit_a, is_stub=True, grip=20.0, accel=1.0, rule_id="r_multi_a")
+    # grip=21.0, not 22.0: measured to clear v1 cleanly (0 crushes); 22.0
+    # crushes 2/100 seeds under CRUSH_LIMIT_JITTER (glass_jar crush_limit=25,
+    # worst-case jittered floor 25*0.85=21.25), which would make this
+    # fixture CHECK1_FAILED instead of CHECK1_PASSED.
+    rule_b = _write_demo_accepted_rule(rule_b_json, audit_b, is_stub=True, grip=21.0, accel=1.0, rule_id="r_multi_b")
+
+    real_access_log = os.path.join(HERE, "runs", "heldout_access.log")
+    real_before = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_a_json, "--audit-path", audit_a,
+            "--rule-file", rule_b_json, "--audit-path", audit_b,
+            "--access-log-path", tmp_access_log,
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+    )
+    real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    if result.returncode != 0:
+        return False, f"expected a clean multi-rule run; rc={result.returncode} stderr={result.stderr.strip()[:500]!r}"
+    if real_before != real_after:
+        return False, "the REAL heldout_access.log changed during a multi-rule run"
+
+    if not os.path.exists(tmp_access_log):
+        return False, f"expected {tmp_access_log} to be written"
+    with open(tmp_access_log) as f:
+        log_lines = [line for line in f if line.strip()]
+    if len(log_lines) != 1:
+        return False, f"expected exactly ONE access-log entry for the whole multi-rule run, got {len(log_lines)}"
+    entry = json.loads(log_lines[0])
+    if set(entry.get("rule_ids", [])) != {rule_a.rule_id, rule_b.rule_id}:
+        return False, f"expected the one entry to list both rule_ids, got {entry.get('rule_ids')}"
+
+    json_candidates = [
+        f for f in os.listdir(os.path.join(HERE, "runs"))
+        if f.startswith("heldout_eval_MULTI_") and f.endswith(".json")
+    ]
+    if not json_candidates:
+        return False, "expected a heldout_eval_MULTI_*.json report to be written"
+    report_path = os.path.join(HERE, "runs", sorted(json_candidates)[-1])
+    with open(report_path) as f:
+        report = json.load(f)
+
+    if report.get("k_rules_evaluated") != 2:
+        return False, f"expected k_rules_evaluated=2, got {report.get('k_rules_evaluated')}"
+    if abs(report.get("bonferroni_threshold", 0) - 0.025) > 1e-9:
+        return False, f"expected bonferroni_threshold=0.025 (0.05/2), got {report.get('bonferroni_threshold')}"
+    rule_ids_in_report = {r["rule_id"] for r in report.get("rules", [])}
+    if rule_ids_in_report != {rule_a.rule_id, rule_b.rule_id}:
+        return False, f"expected both rule_ids in the report, got {rule_ids_in_report}"
+    for r in report["rules"]:
+        d = r.get("criterion_d")
+        if d is None or "pass" not in d:
+            return False, f"expected a criterion_d verdict for {r.get('rule_id')}, got {d}"
+        if "i_cell_b_drop_rate_lower_mcnemar_p" not in d or "threshold" not in d["i_cell_b_drop_rate_lower_mcnemar_p"]:
+            return False, f"expected the Bonferroni threshold recorded per rule, got {d}"
+        if abs(d["i_cell_b_drop_rate_lower_mcnemar_p"]["threshold"] - 0.025) > 1e-9:
+            return False, f"expected the per-rule threshold to be 0.025, got {d['i_cell_b_drop_rate_lower_mcnemar_p']['threshold']}"
+    # Baselines computed once per class, reused across both rules (same glass_jar class here):
+    # naive/ceiling params must be byte-identical across both rule entries.
+    naive_values = {json.dumps(r["naive_baseline_params"], sort_keys=True) for r in report["rules"]}
+    if len(naive_values) != 1:
+        return False, f"expected identical (shared) baseline naive_params across rules, got {naive_values}"
+    return True, ""
+
+
+def test_multi_rule_dev_mode_writes_no_access_log():
+    """--dev with --rule-file must still never touch heldout_access.log,
+    same guarantee as the single-rule path."""
+    rule_a_json = os.path.join(HERE, "runs", "test_multi_rule_dev_a.json")
+    audit_a = os.path.join(HERE, "runs", "test_multi_rule_dev_a_audit.jsonl")
+    rule_a = _write_demo_accepted_rule(rule_a_json, audit_a, is_stub=True, rule_id="r_multi_dev_a")
+
+    real_access_log = os.path.join(HERE, "runs", "heldout_access.log")
+    real_before = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--dev",
+            "--rule-file", rule_a_json, "--audit-path", audit_a,
+            "--cell-b-start", "5000", "--cell-b-end", "5005",
+            "--cell-c-start", "5100", "--cell-c-end", "5105",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+    )
+    real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    if result.returncode != 0:
+        return False, f"expected a clean --dev multi-rule run; rc={result.returncode} stderr={result.stderr.strip()[:500]!r}"
+    if real_before != real_after:
+        return False, "the REAL heldout_access.log changed during a --dev multi-rule run"
+    if "REFUSED" in result.stderr:
+        return False, f"expected --dev to be unaffected by the guards; got {result.stderr!r}"
+    return True, ""
+
+
+def _write_demo_accepted_rule(rule_json_path, audit_path, is_stub=True, grip=20.0, accel=1.0, rule_id="r_heldout_test"):
     """Hand-builds a CHECK1_PASSED rule + matching audit log + accepted_rule.json
     (the same wrapper shape loop.py writes), so evaluate_heldout.py tests don't
     need to run the full loop()/fake_server dance just to get a starting point."""
     rule = Rule(
-        rule_id="r_heldout_test", object_class="glass_jar",
+        rule_id=rule_id, object_class="glass_jar",
         grip_force_min_n=grip, carry_accel_max_ms2=accel,
         proposed_by="test", created_at=dt.datetime.now(dt.timezone.utc),
         rationale="test", source_report_ids=["fr_0001"],
@@ -1209,6 +1345,9 @@ UNIT_TESTS = [
     ("evaluate_heldout.py refuses --held-out on an already-spent range", test_evaluate_heldout_refuses_spent_seeds_end_to_end),
     ("evaluate_heldout.py --dev is unaffected by the new spent/single-use guards", test_evaluate_heldout_dev_mode_unaffected_by_new_guards),
     ("evaluate_heldout.py --access-log-path is honored and the real log stays untouched", test_evaluate_heldout_custom_access_log_path_used),
+    ("multi-rule evaluator refuses a --rule-file/--audit-path count mismatch", test_multi_rule_rejects_rule_file_audit_path_count_mismatch),
+    ("multi-rule evaluator evaluates all rules in one invocation (shared baselines, one log entry)", test_multi_rule_evaluates_all_rules_in_one_invocation),
+    ("multi-rule evaluator --dev mode writes no access log", test_multi_rule_dev_mode_writes_no_access_log),
     ("evaluate_heldout.py shows both Cell C scenarios, ceiling row, stub label", test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label),
     ("loop returns NoSafeRule for an unfixable seed set", test_loop_no_safe_rule_for_unfixable_seeds),
     ("feedback reaches the second request", test_feedback_reaches_second_request),

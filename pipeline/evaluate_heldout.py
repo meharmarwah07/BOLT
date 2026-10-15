@@ -35,6 +35,18 @@ DEV_SEEDS_RANGE (5000-5199), never writes heldout_access.log, and stamps
 "DEV RUN" in its own output files (heldout_eval_<rule_id>_DEV.{json,md},
 never overwriting a real --held-out run's output). --held-out and --dev
 are mutually exclusive; the real --held-out path is otherwise unchanged.
+
+Multi-rule path (docs/SUCCESS_CRITERION.md item B/C): pass --rule-file
+one or more times (each a gate-passing rule's accepted_rule.json-shaped
+file, paired with a matching --audit-path in the same order) instead of
+--rule-json to evaluate EVERY given rule in ONE invocation -- shared
+guards, ONE access-log entry (rule_ids, plural), baselines computed once
+per object_class. Each rule gets its own table plus a item-D verdict
+(Cell B drop rate lower with paired exact McNemar p < 0.05/k, Bonferroni-
+corrected for k rules evaluated; Cell C drop rate not higher; crush not
+increased on either cell). Output: heldout_eval_MULTI_<timestamp>
+{_DEV}.{json,md}. The original single-rule path (--rule-json, default)
+is unchanged when --rule-file is not given.
 """
 import argparse
 import datetime as dt
@@ -128,6 +140,7 @@ GRID_RESOLUTION = 6
 CEILING_GRIP_MARGIN_N = 0.1
 
 STUB_LABEL = "STUB RULE - not a model result"
+DEFAULT_AUDIT_PATH = os.path.join(RUNS_DIR, "loop_demo_audit.jsonl")
 
 
 def _class_value(object_class) -> str:
@@ -180,11 +193,13 @@ def check_final_range_single_use_guard(cell_ranges, access_log_path, override_re
     prior = _prior_runs_touching_range(access_log_path, final_range)
     if not prior:
         return None
+    # rule_id (single-rule log entries) or rule_ids (multi-rule entries) -- whichever is present.
+    prior_rule_ref = prior[-1].get("rule_id") or prior[-1].get("rule_ids")
     return (
         f"REFUSED: seeds {final_range.start}-{final_range.stop - 1} are the final held-out range "
         "(docs/FINAL_PROTOCOL.md: 'used once. No rule, prompt, gate or selection change after the "
         f"first look.'), and {access_log_path} already records {len(prior)} prior run(s) touching "
-        f"it (most recent: {prior[-1].get('ts')}, rule_id={prior[-1].get('rule_id')!r}). Pass "
+        f"it (most recent: {prior[-1].get('ts')}, rule_id(s)={prior_rule_ref!r}). Pass "
         "--override-reason \"...\" to proceed anyway (recorded in the log for audit)."
     )
 
@@ -284,17 +299,44 @@ def _paired_counts(before_results, after_results):
     return fixed, newly_broken
 
 
-def _measure(target_class, cell_label, seeds, conditions):
-    """conditions: {name: params or None}. None means "same as baseline,
-    not evaluated" (used for a denied share). Returns {name: row dict}."""
+def _measure_baselines(target_class, seeds, baseline_conditions):
+    """baseline_conditions: {name: params}, must include "none". Returns
+    (baseline_batch, {name: row}) -- the "none" BatchSummary plus every
+    baseline's row. Computed once per (target_class, cell seeds) and
+    reused across every rule evaluated on them (multi-rule evaluation:
+    "baselines once", not once per rule)."""
     rows = {}
-    baseline_batch = run_batch(target_class, conditions["none"], seeds, parallel=True)
-    rows["none"] = _row(baseline_batch, baseline_batch, conditions["none"])
-    for name, params in conditions.items():
+    baseline_batch = run_batch(target_class, baseline_conditions["none"], seeds, parallel=True)
+    rows["none"] = _row(baseline_batch, baseline_batch, baseline_conditions["none"])
+    for name, params in baseline_conditions.items():
         if name == "none":
             continue
         batch = run_batch(target_class, params, seeds, parallel=True) if params is not None else baseline_batch
-        rows[name] = _row(baseline_batch, batch, params if params is not None else conditions["none"])
+        rows[name] = _row(baseline_batch, batch, params if params is not None else baseline_conditions["none"])
+    return baseline_batch, rows
+
+
+def _measure_rule(baseline_batch, baseline_params, target_class, seeds, rule_params):
+    """One rule's own row on `seeds`, reusing the already-computed
+    `baseline_batch` (not recomputing it) for the paired fixed/newly-
+    broken comparison. rule_params=None means "not evaluated here" (e.g.
+    a denied share) -- same as the baseline itself."""
+    batch = run_batch(target_class, rule_params, seeds, parallel=True) if rule_params is not None else baseline_batch
+    return _row(baseline_batch, batch, rule_params if rule_params is not None else baseline_params)
+
+
+def _measure(target_class, cell_label, seeds, conditions):
+    """conditions: {name: params or None}, optionally including
+    "accepted_rule". None means "same as baseline, not evaluated" (used
+    for a denied share). Returns {name: row dict}. Thin wrapper over
+    _measure_baselines/_measure_rule -- kept so the single-rule path's
+    behavior (incl. key order) is unchanged."""
+    baseline_conditions = {k: v for k, v in conditions.items() if k != "accepted_rule"}
+    baseline_batch, rows = _measure_baselines(target_class, seeds, baseline_conditions)
+    if "accepted_rule" in conditions:
+        rows["accepted_rule"] = _measure_rule(
+            baseline_batch, conditions["none"], target_class, seeds, conditions["accepted_rule"],
+        )
     return rows
 
 
@@ -343,32 +385,317 @@ def _markdown_table(cell_label, rows, controller_by_condition):
     return "\n".join(lines)
 
 
+def _paired_mcnemar(rows, name_a, name_b):
+    """Paired exact McNemar (two-sided), task-success (outcome == "ok") on
+    each seed common to both `rows[name_a]` and `rows[name_b]`. Returns
+    (b, c, p) -- b/c are the discordant counts stats.mcnemar_exact needs;
+    see its docstring."""
+    a_success = {o["seed"]: o["outcome"] == "ok" for o in rows[name_a]["outcomes_by_seed"]}
+    b_success = {o["seed"]: o["outcome"] == "ok" for o in rows[name_b]["outcomes_by_seed"]}
+    common = sorted(set(a_success) & set(b_success))
+    b = sum(1 for s in common if a_success[s] and not b_success[s])
+    c = sum(1 for s in common if not a_success[s] and b_success[s])
+    return b, c, llm_stats.mcnemar_exact(b, c)
+
+
 def _mcnemar_table(cell_label, rows, accepted_name="accepted_rule"):
     """Paired exact McNemar (two-sided), task-success (outcome == "ok") on
     each seed, accepted_rule vs every other condition measured on this
-    cell's own seeds. b/c are the discordant counts stats.mcnemar_exact
-    needs; see its docstring. Returns "" if accepted_rule wasn't measured
-    on this cell (e.g. this cell's rows only cover the no-rule baseline).
+    cell's own seeds. Returns "" if accepted_rule wasn't measured on this
+    cell (e.g. this cell's rows only cover the no-rule baseline).
     """
     if accepted_name not in rows:
         return ""
-    accepted_success = {o["seed"]: o["outcome"] == "ok" for o in rows[accepted_name]["outcomes_by_seed"]}
     lines = [
         f"### Cell {cell_label}: paired exact McNemar ({accepted_name} vs each baseline, task success)",
         "",
         "| baseline | b (accepted-only success) | c (baseline-only success) | p-value (two-sided) |",
         "|---|---|---|---|",
     ]
-    for name, row in rows.items():
+    for name in rows:
         if name == accepted_name:
             continue
-        other_success = {o["seed"]: o["outcome"] == "ok" for o in row["outcomes_by_seed"]}
-        common_seeds = sorted(set(accepted_success) & set(other_success))
-        b = sum(1 for s in common_seeds if accepted_success[s] and not other_success[s])
-        c = sum(1 for s in common_seeds if not accepted_success[s] and other_success[s])
-        p = llm_stats.mcnemar_exact(b, c)
+        b, c, p = _paired_mcnemar(rows, accepted_name, name)
         lines.append(f"| {name} | {b} | {c} | {p:.4f} |")
     return "\n".join(lines)
+
+
+def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, audit_paths):
+    """Multi-rule path (--rule-file, one or more): evaluates every given
+    gate-passing rule in ONE invocation. docs/SUCCESS_CRITERION.md:
+    item B (every gate-passing rule evaluated, no selection among runs),
+    item C (one evaluator invocation, seeds 3000-3199, run once), item D
+    (per-rule success with a Bonferroni-corrected McNemar threshold),
+    item F (zero rules -> no final evaluation, handled by the caller
+    simply never invoking this function with an empty --rule-file list).
+
+    Shares the spent-seed/single-use guards and the access-log write with
+    the single-rule path (run once here, not per rule), and shares
+    baselines across every rule targeting the same object_class (computed
+    once per class, not once per rule).
+    """
+    rule_entries = []  # (rule_file, audit_path, rule_label, is_stub, rule)
+    for rule_file, audit_path in zip(args.rule_file, audit_paths):
+        if not os.path.exists(rule_file):
+            print(
+                f"REFUSED: {rule_file} does not exist. Run pipeline/loop.py first -- it writes "
+                "this file once a candidate reaches CHECK1_PASSED.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        with open(rule_file) as f:
+            accepted_data = json.load(f)
+        rule_label = accepted_data.get("label")
+        rule = Rule.model_validate(accepted_data["rule"])
+        rule_entries.append((rule_file, audit_path, rule_label, accepted_data.get("is_stub"), rule))
+
+    k = len(rule_entries)
+    bonferroni_threshold = 0.05 / k
+
+    if not args.dev:
+        cell_ranges = (("cell-b", cell_b_start, cell_b_end), ("cell-c", cell_c_start, cell_c_end))
+        refusal = check_spent_seed_guard(cell_ranges)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
+        refusal = check_final_range_single_use_guard(cell_ranges, args.access_log_path, args.override_reason)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            sys.exit(1)
+
+    dev_banner = "DEV RUN -- seeds 5000-5199, not a held-out measurement" if args.dev else None
+    if dev_banner:
+        print(dev_banner)
+    top_notice = (
+        "NOTICE: this is a non-interactive demo script. Check 2 (human approval) is "
+        "AUTO-APPROVED here for the purpose of this held-out evaluation -- a real "
+        "deployment requires an actual human reviewer (rules/review_cli.py), not this "
+        "script. The baseline ('none' / 'without the rule') condition in every table "
+        f"below is the nominal setting {dict(check1_mod.BASELINE_PARAMS)} "
+        "(grip_force_n, carry_accel_ms2) -- see pipeline/check1.py's BASELINE_PARAMS "
+        f"for how and why it was chosen. docs/SUCCESS_CRITERION.md item D(i): Bonferroni-"
+        f"adjusted significance threshold 0.05/{k} = {bonferroni_threshold:.6g} (k = {k} "
+        "rules evaluated in this invocation). Cell C verdicts below use the "
+        "'C_sharing_allowed' counterfactual (would this rule hurt/help Cell C if shared), "
+        "not the realistic default decision, which is reported separately."
+    )
+    print(top_notice)
+    print()
+
+    for _rule_file, audit_path, _rule_label, _is_stub, rule in rule_entries:
+        _ensure_approved(audit_path, rule, args.actor)
+
+    cell_b_seeds = range(cell_b_start, cell_b_end)
+    cell_c_seeds = range(cell_c_start, cell_c_end)
+
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    if not args.dev:
+        os.makedirs(os.path.dirname(os.path.abspath(args.access_log_path)) or ".", exist_ok=True)
+        with open(args.access_log_path, "a") as f:
+            f.write(json.dumps({
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "actor": args.actor,
+                "rule_ids": [rule.rule_id for *_, rule in rule_entries],
+                "cell_b_seeds": [cell_b_seeds.start, cell_b_seeds.stop],
+                "cell_c_seeds": [cell_c_seeds.start, cell_c_seeds.stop],
+                "override_reason": args.override_reason,
+            }) + "\n")
+
+    cell_a = CellState("A", OWNER_A_B, check1_mod.BASELINE_PARAMS)
+    cell_b = CellState("B", OWNER_A_B, check1_mod.BASELINE_PARAMS)
+    cell_c = CellState("C", OWNER_C, check1_mod.BASELINE_PARAMS)
+    owners_denied = {OWNER_A_B: Owner(OWNER_A_B, sharing_enabled=False), OWNER_C: Owner(OWNER_C)}
+    owners_allowed = {OWNER_A_B: Owner(OWNER_A_B, sharing_enabled=True), OWNER_C: Owner(OWNER_C)}
+
+    # Baselines, once per target_class (not once per rule) -- most/all
+    # rules are expected to share one class (CONTEXT.md's glass_jar), but
+    # this is correct even if they don't.
+    baselines_by_class = {}
+
+    def _baselines_for(target_class):
+        if target_class in baselines_by_class:
+            return baselines_by_class[target_class]
+        grid_rule = _grid_search_mildest_passing_rule(target_class, [f"multi_rule_eval_{target_class}"])
+        grid_note = None
+        if grid_rule is None:
+            grid_note = (
+                f"none passes v{check1_mod.CHECK1_VERSION} -- no (grip, accel) grid point for "
+                f"{target_class!r} cleared Check 1 v{check1_mod.CHECK1_VERSION} on GRID_TRAIN_SEEDS "
+                f"{GRID_TRAIN_SEEDS.start}-{GRID_TRAIN_SEEDS.stop - 1} (resolution {GRID_RESOLUTION}x"
+                f"{GRID_RESOLUTION})."
+            )
+            print(f"NOTE: {grid_note}", file=sys.stderr)
+        crush_limit = CRUSH_LIMIT_N[target_class]
+        naive_params = {"grip_force_n": round(0.9 * crush_limit, 3), "carry_accel_ms2": CARRY_ACCEL_MIN_MS2}
+        ceiling_params = {
+            "grip_force_n": round(crush_limit - CEILING_GRIP_MARGIN_N, 3), "carry_accel_ms2": CARRY_ACCEL_MIN_MS2,
+        }
+        baseline_conditions = {
+            "none": dict(check1_mod.BASELINE_PARAMS),
+            "naive_0.9x_crush_min_accel": naive_params,
+            "ceiling_near_crush_min_accel": ceiling_params,
+            "grid_mildest_passing": (
+                apply(grid_rule, check1_mod.BASELINE_PARAMS, target_class) if grid_rule is not None else None
+            ),
+        }
+        b_batch, b_rows = _measure_baselines(target_class, cell_b_seeds, baseline_conditions)
+        c_batch, c_rows = _measure_baselines(target_class, cell_c_seeds, baseline_conditions)
+        entry = {
+            "grid_rule": grid_rule, "grid_note": grid_note,
+            "naive_params": naive_params, "ceiling_params": ceiling_params,
+            "conditions": baseline_conditions,
+            "B": (b_batch, b_rows), "C": (c_batch, c_rows),
+        }
+        baselines_by_class[target_class] = entry
+        return entry
+
+    rule_reports = []
+    md_blocks = []
+    summary_rows = []
+    for rule_file, audit_path, rule_label, is_stub, rule in rule_entries:
+        target_class = _class_value(rule.object_class)
+        baseline = _baselines_for(target_class)
+        b_batch, b_baseline_rows = baseline["B"]
+        c_batch, c_baseline_rows = baseline["C"]
+
+        try:
+            rule_after_params = apply(rule, check1_mod.BASELINE_PARAMS, target_class)
+        except RuleRejected as e:
+            print(f"REFUSED: apply() rejected rule {rule.rule_id}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        decision_b = can_share(audit_path, rule, cell_a, cell_b, owners_denied)
+        decision_c_denied = can_share(audit_path, rule, cell_a, cell_c, owners_denied)
+        decision_c_allowed = can_share(audit_path, rule, cell_a, cell_c, owners_allowed)
+
+        rows_b = dict(b_baseline_rows)
+        rows_b["accepted_rule"] = _measure_rule(
+            b_batch, check1_mod.BASELINE_PARAMS, target_class, cell_b_seeds,
+            rule_after_params if decision_b.allowed else None,
+        )
+        rows_c_denied = dict(c_baseline_rows)
+        rows_c_denied["accepted_rule"] = _measure_rule(
+            c_batch, check1_mod.BASELINE_PARAMS, target_class, cell_c_seeds,
+            rule_after_params if decision_c_denied.allowed else None,
+        )
+        rows_c_allowed = dict(c_baseline_rows)
+        rows_c_allowed["accepted_rule"] = _measure_rule(
+            c_batch, check1_mod.BASELINE_PARAMS, target_class, cell_c_seeds,
+            rule_after_params if decision_c_allowed.allowed else None,
+        )
+
+        # Item D: (i) uses Cell B; (ii)/(iii) use the 'C_sharing_allowed'
+        # counterfactual (see top_notice) -- the realistic default
+        # ('C_sharing_denied') never applies the rule, so comparing it
+        # against itself would be trivially unchanged.
+        _, _, p_b = _paired_mcnemar(rows_b, "accepted_rule", "none")
+        verdict_i = rows_b["accepted_rule"]["drop_rate"] < rows_b["none"]["drop_rate"] and p_b < bonferroni_threshold
+        verdict_ii = rows_c_allowed["accepted_rule"]["drop_rate"] <= rows_c_allowed["none"]["drop_rate"]
+        verdict_iii = (
+            rows_b["accepted_rule"]["n_crush"] <= rows_b["none"]["n_crush"]
+            and rows_c_allowed["accepted_rule"]["n_crush"] <= rows_c_allowed["none"]["n_crush"]
+        )
+        verdict_d = verdict_i and verdict_ii and verdict_iii
+
+        results = {
+            "B": {"seeds": [cell_b_seeds.start, cell_b_seeds.stop],
+                  "can_share_decision": {"allowed": decision_b.allowed, "reason": decision_b.reason}, "rows": rows_b},
+            "C_sharing_denied": {"seeds": [cell_c_seeds.start, cell_c_seeds.stop],
+                                  "can_share_decision": {"allowed": decision_c_denied.allowed, "reason": decision_c_denied.reason},
+                                  "rows": rows_c_denied},
+            "C_sharing_allowed": {"seeds": [cell_c_seeds.start, cell_c_seeds.stop],
+                                   "can_share_decision": {"allowed": decision_c_allowed.allowed, "reason": decision_c_allowed.reason},
+                                   "rows": rows_c_allowed},
+        }
+        stub_label = rule_label or (STUB_LABEL if is_stub else None)
+        rule_reports.append({
+            "rule_id": rule.rule_id,
+            "rule_file": rule_file,
+            "stub_label": stub_label,
+            "target_class": target_class,
+            "rule": rule.model_dump(mode="json"),
+            "grid_mildest_passing_rule": baseline["grid_rule"].model_dump(mode="json") if baseline["grid_rule"] is not None else None,
+            "grid_mildest_passing_note": baseline["grid_note"],
+            "naive_baseline_params": baseline["naive_params"],
+            "ceiling_params": baseline["ceiling_params"],
+            "results": results,
+            "criterion_d": {
+                "i_cell_b_drop_rate_lower_mcnemar_p": {"pass": verdict_i, "p_value": p_b, "threshold": bonferroni_threshold},
+                "ii_cell_c_drop_rate_not_higher": {"pass": verdict_ii},
+                "iii_crush_not_increased": {"pass": verdict_iii},
+                "pass": verdict_d,
+            },
+        })
+
+        summary_rows.append(
+            f"| {rule.rule_id} | {target_class} | {rows_b['none']['drop_rate']:.3f} | "
+            f"{rows_b['accepted_rule']['drop_rate']:.3f} | {p_b:.4g} | {bonferroni_threshold:.4g} | "
+            f"{rows_c_allowed['none']['drop_rate']:.3f} | {rows_c_allowed['accepted_rule']['drop_rate']:.3f} | "
+            f"{rows_b['none']['n_crush']}->{rows_b['accepted_rule']['n_crush']} | "
+            f"{rows_c_allowed['none']['n_crush']}->{rows_c_allowed['accepted_rule']['n_crush']} | "
+            f"{'PASS' if verdict_d else 'FAIL'} |"
+        )
+
+        md_blocks.append(f"## Rule {rule.rule_id} ({target_class}){f' [{stub_label}]' if stub_label else ''}")
+        md_blocks.append("")
+        for cell_label in ("B", "C_sharing_denied", "C_sharing_allowed"):
+            cell_result = results[cell_label]
+            md_blocks.append(
+                f"Cell {cell_label} can_share: allowed={cell_result['can_share_decision']['allowed']} "
+                f"({cell_result['can_share_decision']['reason']})"
+            )
+            md_blocks.append("")
+            controller_by_condition = dict(baseline["conditions"])
+            controller_by_condition["accepted_rule"] = (
+                rule_after_params if cell_result["can_share_decision"]["allowed"] else check1_mod.BASELINE_PARAMS
+            )
+            md_blocks.append(_markdown_table(cell_label, cell_result["rows"], controller_by_condition))
+            md_blocks.append("")
+            mcnemar_md = _mcnemar_table(cell_label, cell_result["rows"])
+            if mcnemar_md:
+                md_blocks.append(mcnemar_md)
+                md_blocks.append("")
+        md_blocks.append(
+            f"criterion D: (i) Cell B drop rate lower & p<{bonferroni_threshold:.4g}: {verdict_i} "
+            f"(p={p_b:.4g}); (ii) Cell C drop rate not higher: {verdict_ii}; (iii) crush not increased: "
+            f"{verdict_iii} => **{'PASS' if verdict_d else 'FAIL'}**"
+        )
+        md_blocks.append("")
+
+    report = {
+        "dev_run": args.dev,
+        "notice": top_notice,
+        "baseline_params": dict(check1_mod.BASELINE_PARAMS),
+        "k_rules_evaluated": k,
+        "bonferroni_threshold": bonferroni_threshold,
+        "rules": rule_reports,
+    }
+
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    file_suffix = "_DEV" if args.dev else ""
+    json_path = os.path.join(RUNS_DIR, f"heldout_eval_MULTI_{timestamp}{file_suffix}.json")
+    with open(json_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    md_lines = [f"# Held-out evaluation (multi-rule, k={k}){' [DEV RUN]' if args.dev else ''}", ""]
+    if dev_banner:
+        md_lines += [dev_banner, ""]
+    md_lines += [top_notice, ""]
+    md_lines += [
+        "| rule_id | class | B drop (none) | B drop (rule) | B McNemar p | Bonferroni thr. | "
+        "C drop (none) | C drop (rule) | B crush none->rule | C crush none->rule | verdict D |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    md_lines += summary_rows
+    md_lines.append("")
+    md_lines += md_blocks
+    md_path = os.path.join(RUNS_DIR, f"heldout_eval_MULTI_{timestamp}{file_suffix}.md")
+    with open(md_path, "w") as f:
+        f.write("\n".join(md_lines))
+
+    print("\n".join(md_lines))
+    print(f"\nwrote {json_path}")
+    print(f"wrote {md_path}")
 
 
 def main():
@@ -377,8 +704,17 @@ def main():
     p.add_argument("--dev", action="store_true",
                     help="dev mode: seeds must be in DEV_SEEDS_RANGE (5000-5199), never touches "
                          "heldout_access.log, and stamps DEV RUN in the output. Mutually exclusive with --held-out.")
-    p.add_argument("--rule-json", default=os.path.join(RUNS_DIR, "accepted_rule.json"))
-    p.add_argument("--audit-path", default=os.path.join(RUNS_DIR, "loop_demo_audit.jsonl"))
+    p.add_argument("--rule-json", default=os.path.join(RUNS_DIR, "accepted_rule.json"),
+                    help="single-rule path (default). Ignored if --rule-file is given.")
+    p.add_argument("--rule-file", action="append", default=None,
+                    help="multi-rule path: one gate-passing rule's accepted_rule.json-shaped file "
+                         "(docs/SUCCESS_CRITERION.md item B: every gate-passing rule from every "
+                         "revised run is evaluated, no selection among runs). Repeat for each rule; "
+                         "pair with a matching --audit-path in the same order (one per --rule-file). "
+                         "Evaluates all of them in ONE invocation: baselines once, one access-log entry.")
+    p.add_argument("--audit-path", action="append", default=None,
+                    help=f"single-rule path: at most one (default: {DEFAULT_AUDIT_PATH}). Multi-rule "
+                         "path (--rule-file): exactly one per --rule-file, same order.")
     p.add_argument("--cell-b-start", type=int, default=None)
     p.add_argument("--cell-b-end", type=int, default=None)
     p.add_argument("--cell-c-start", type=int, default=None)
@@ -426,6 +762,29 @@ def main():
         cell_c_start = args.cell_c_start if args.cell_c_start is not None else CELL_C_SEEDS_DEFAULT.start
         cell_c_end = args.cell_c_end if args.cell_c_end is not None else CELL_C_SEEDS_DEFAULT.stop
 
+    audit_paths = args.audit_path if args.audit_path else [DEFAULT_AUDIT_PATH]
+
+    if args.rule_file:
+        if len(audit_paths) != len(args.rule_file):
+            print(
+                f"REFUSED: --rule-file was given {len(args.rule_file)} time(s) but --audit-path "
+                f"{len(audit_paths)} time(s) -- pass exactly one --audit-path per --rule-file, in "
+                "the same order.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, audit_paths)
+        return
+
+    if len(audit_paths) != 1:
+        print(
+            f"REFUSED: --audit-path was given {len(audit_paths)} times without --rule-file -- the "
+            "single-rule path (--rule-json) takes at most one --audit-path.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    audit_path = audit_paths[0]
+
     if not os.path.exists(args.rule_json):
         print(
             f"REFUSED: {args.rule_json} does not exist. Run pipeline/loop.py first -- it "
@@ -470,7 +829,7 @@ def main():
     print(top_notice)
     print()
 
-    _ensure_approved(args.audit_path, rule, args.actor)
+    _ensure_approved(audit_path, rule, args.actor)
 
     cell_b_seeds = range(cell_b_start, cell_b_end)
     cell_c_seeds = range(cell_c_start, cell_c_end)
@@ -503,9 +862,9 @@ def main():
     owners_denied = {OWNER_A_B: Owner(OWNER_A_B, sharing_enabled=False), OWNER_C: Owner(OWNER_C)}
     owners_allowed = {OWNER_A_B: Owner(OWNER_A_B, sharing_enabled=True), OWNER_C: Owner(OWNER_C)}
 
-    decision_b = can_share(args.audit_path, rule, cell_a, cell_b, owners_denied)
-    decision_c_denied = can_share(args.audit_path, rule, cell_a, cell_c, owners_denied)
-    decision_c_allowed = can_share(args.audit_path, rule, cell_a, cell_c, owners_allowed)
+    decision_b = can_share(audit_path, rule, cell_a, cell_b, owners_denied)
+    decision_c_denied = can_share(audit_path, rule, cell_a, cell_c, owners_denied)
+    decision_c_allowed = can_share(audit_path, rule, cell_a, cell_c, owners_allowed)
 
     try:
         rule_after_params = apply(rule, check1_mod.BASELINE_PARAMS, target_class)
