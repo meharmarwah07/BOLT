@@ -138,13 +138,24 @@ class LoopResult:
     attempts: list = field(default_factory=list)
 
 
-def _build_feedback(round_attempts) -> str:
+def _build_feedback(round_attempts, all_attempts=None) -> str:
+    """`all_attempts` (optional): every AttemptRecord made so far in this
+    loop run (all rounds, including this one), used to build the tried-
+    grips table below. Defaults to `round_attempts` (this round only) when
+    not given, so any other caller of this function keeps working.
+
+    Does not echo rec.no_safe_rule_reason: REVISION.md's hypothesis is that
+    echoing the model's own decline reasoning (e.g. an assumed friction
+    estimate) back into the next round's prompt reinforces that same
+    reasoning. A decline is reported as just "declined", with no reason
+    text.
+    """
     lines = []
     for rec in round_attempts:
         if rec.error is not None:
             lines.append(f"Candidate {rec.candidate_index}: solve() failed ({rec.error}).")
         elif rec.no_safe_rule_reason is not None:
-            lines.append(f"Candidate {rec.candidate_index}: proposed no_safe_rule ({rec.no_safe_rule_reason}).")
+            lines.append(f"Candidate {rec.candidate_index}: declined.")
         elif rec.rule is not None and rec.check1 is not None:
             r, c1 = rec.rule, rec.check1
             obj_class = r.object_class.value if hasattr(r.object_class, "value") else r.object_class
@@ -155,11 +166,35 @@ def _build_feedback(round_attempts) -> str:
                 f"fixed {len(c1.seeds_fixed)} seeds, newly broke {len(c1.seeds_newly_broken)} previously-ok seeds, "
                 f"crush_count={c1.crush_count_after}. Rejected: {'; '.join(c1.reasons)}"
             )
+
+    table_source = all_attempts if all_attempts is not None else round_attempts
+    tried = sorted(
+        (rec for rec in table_source if rec.rule is not None and rec.check1 is not None
+         and rec.rule.grip_force_min_n is not None),
+        key=lambda rec: rec.rule.grip_force_min_n,
+    )
+    table_lines = []
+    if tried:
+        table_lines.append("\nEvery grip tried so far (sorted by grip force), from real Check 1 replay:")
+        table_lines.append("grip_force_min_n | drop_rate_after | crush_count_after | combined_failure_rate")
+        for rec in tried:
+            c1 = rec.check1
+            combined = (
+                c1.combined_failure_rate if c1.combined_failure_rate is not None
+                else (c1.drop_rate_after + c1.crush_count_after / c1.n_trials if c1.n_trials else 0.0)
+            )
+            table_lines.append(
+                f"{rec.rule.grip_force_min_n:.2f} N | {c1.drop_rate_after:.2f} | "
+                f"{c1.crush_count_after} | {combined:.2f}"
+            )
+
     return (
         "Every rule proposed so far was rejected by Check 1 (real simulation replay), not by guesswork. "
-        "Details per candidate:\n" + "\n".join(lines) + "\n\n"
+        "Details per candidate:\n" + "\n".join(lines) + "\n"
+        + "\n".join(table_lines) + "\n\n"
         "Propose a different rule for the same failure that fixes more of the baseline drops "
-        "without crushing the object or breaking any previously-ok seed."
+        "without crushing the object or breaking any previously-ok seed. "
+        "Replay results override any physics estimate."
     )
 
 
@@ -284,7 +319,7 @@ def loop(
                 attempts=attempts,
             )
 
-        feedback = _build_feedback(round_attempts)
+        feedback = _build_feedback(round_attempts, attempts)
 
     return LoopResult(
         check1_passed_rule=None,

@@ -496,6 +496,89 @@ def _make_attempt(rule_id, combined_upper, crush_count_after=0, margin=0.0, slow
     return rec
 
 
+def _feedback_attempt(rule_id, grip, drop_rate_after, crush_count_after, combined_failure_rate,
+                       round_=1, candidate_index=1, n_trials=100):
+    rec = loop_mod.AttemptRecord(round=round_, candidate_index=candidate_index)
+    rec.rule = _rule(rule_id=rule_id, grip_force_min_n=grip)
+    rec.check1 = check1_mod.Check1Outcome(
+        passed=False,
+        reasons=["rejected: too weak"],
+        drop_rate_before=0.5,
+        drop_rate_after=drop_rate_after,
+        crush_count_after=crush_count_after,
+        combined_failure_rate=combined_failure_rate,
+        n_trials=n_trials,
+        seeds_fixed=[1, 2],
+        seeds_newly_broken=[],
+    )
+    return rec
+
+
+def test_feedback_omits_decline_reason_text():
+    """REVISION.md's hypothesis: echoing the model's own decline reasoning
+    (e.g. an assumed friction estimate) back into the next round's prompt
+    reinforces that same reasoning. A decline must appear as just
+    "declined", with the reason text dropped entirely."""
+    rec = loop_mod.AttemptRecord(round=1, candidate_index=1)
+    rec.no_safe_rule_reason = "an assumed friction coefficient of 0.15 means this cannot be fixed"
+    feedback = loop_mod._build_feedback([rec])
+    if "friction coefficient" in feedback or "0.15" in feedback:
+        return False, f"expected the decline reason text to be omitted from feedback; got: {feedback!r}"
+    if "declined" not in feedback:
+        return False, f"expected 'declined' to still appear in feedback; got: {feedback!r}"
+    return True, ""
+
+
+def test_feedback_contains_sorted_grip_table():
+    a = _feedback_attempt("r_a", grip=10.0, drop_rate_after=0.40, crush_count_after=0,
+                           combined_failure_rate=0.40, candidate_index=1)
+    b = _feedback_attempt("r_b", grip=6.0, drop_rate_after=0.70, crush_count_after=1,
+                           combined_failure_rate=0.71, candidate_index=2)
+    feedback = loop_mod._build_feedback([a, b])
+    idx_6 = feedback.find("6.00 N")
+    idx_10 = feedback.find("10.00 N")
+    if idx_6 == -1 or idx_10 == -1:
+        return False, f"expected both tried grip values in the table; got: {feedback!r}"
+    if idx_6 > idx_10:
+        return False, "expected the table sorted by grip ascending (6.00 N before 10.00 N)"
+    if "0.40" not in feedback or "0.71" not in feedback:
+        return False, "expected drop-rate/combined-failure numbers in the table"
+    return True, ""
+
+
+def test_feedback_table_spans_all_rounds_when_given():
+    round1 = [_feedback_attempt("r_round1", grip=8.0, drop_rate_after=0.5, crush_count_after=0,
+                                 combined_failure_rate=0.5, round_=1, candidate_index=1)]
+    round2 = [_feedback_attempt("r_round2", grip=12.0, drop_rate_after=0.3, crush_count_after=0,
+                                 combined_failure_rate=0.3, round_=2, candidate_index=1)]
+    all_attempts = round1 + round2
+    feedback = loop_mod._build_feedback(round2, all_attempts)
+    if "8.00 N" not in feedback:
+        return False, "expected round 1's tried grip to still appear in the cumulative table"
+    if "12.00 N" not in feedback:
+        return False, "expected round 2's tried grip to appear in the cumulative table"
+    return True, ""
+
+
+def test_feedback_table_falls_back_to_this_round_without_all_attempts():
+    round1 = [_feedback_attempt("r_round1", grip=8.0, drop_rate_after=0.5, crush_count_after=0,
+                                 combined_failure_rate=0.5, round_=1, candidate_index=1)]
+    feedback = loop_mod._build_feedback(round1)  # no all_attempts given
+    if "8.00 N" not in feedback:
+        return False, "expected this round's own tried grip in the table when all_attempts is omitted"
+    return True, ""
+
+
+def test_feedback_keeps_closing_instruction_and_appends_replay_override():
+    rec = _feedback_attempt("r_x", grip=10.0, drop_rate_after=0.4, crush_count_after=0, combined_failure_rate=0.4)
+    feedback = loop_mod._build_feedback([rec])
+    if "Propose a different rule for the same failure" not in feedback:
+        return False, f"expected the original closing instruction to be kept; got: {feedback!r}"
+    if "Replay results override any physics estimate" not in feedback:
+        return False, f"expected the appended replay-overrides-physics sentence; got: {feedback!r}"
+    return True, ""
+
+
 def test_selection_picks_lowest_combined_failure_upper_bound():
     """Pure unit test of loop._pick_best_passing -- no server needed. The
     STAGE A regression case: a candidate with a WORSE (smaller) margin but
@@ -935,6 +1018,11 @@ UNIT_TESTS = [
     ("evaluate_heldout.py shows both Cell C scenarios, ceiling row, stub label", test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label),
     ("loop returns NoSafeRule for an unfixable seed set", test_loop_no_safe_rule_for_unfixable_seeds),
     ("feedback reaches the second request", test_feedback_reaches_second_request),
+    ("feedback omits the model's own decline reason text", test_feedback_omits_decline_reason_text),
+    ("feedback contains a grip table sorted by grip", test_feedback_contains_sorted_grip_table),
+    ("feedback grip table spans all rounds when given", test_feedback_table_spans_all_rounds_when_given),
+    ("feedback grip table falls back to this round alone", test_feedback_table_falls_back_to_this_round_without_all_attempts),
+    ("feedback keeps its closing instruction and appends the replay-override sentence", test_feedback_keeps_closing_instruction_and_appends_replay_override),
     ("loop returns the passing rule with CHECK1_PASSED", test_loop_returns_passing_rule_with_check1_passed),
     ("lifecycle events logged exactly once for the passing rule", test_lifecycle_logged_once_for_passing_rule),
     ("selection picks the lowest combined-failure upper bound", test_selection_picks_lowest_combined_failure_upper_bound),
