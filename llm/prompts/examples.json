@@ -52,21 +52,25 @@
     {
       "failure_reports": [
         {
-          "report_id": "ex_cardboard_002",
+          "report_id": "ex_cardboard_003",
           "cell_id": "C",
           "owner_id": "owner2",
           "object_class": "cardboard",
-          "controller": {"grip_force_n": 11.5, "carry_accel_ms2": 1.0},
+          "controller": {"grip_force_n": 7.0, "carry_accel_ms2": 1.0},
           "outcome": "drop",
           "drop_phase": "carry",
-          "slip_mm_before_drop": 22.0,
-          "est_mass_kg": 3.0,
-          "seed": 888
+          "slip_mm_before_drop": 14.0,
+          "est_mass_kg": 0.9,
+          "seed": 999
         }
       ],
       "response": {
-        "no_safe_rule": true,
-        "reason": "Grip is already 11.5 N, just under the 12 N cardboard crush limit, so it cannot be raised. Lowering accel to the 0.5 m/s^2 minimum only cuts the needed grip force by about 5% ((9.81+0.5)/(9.81+1.0)) -- too little for 22.0 mm of slip. No safe rule exists."
+        "rule_id": "r_ex_cardboard_003",
+        "object_class": "cardboard",
+        "grip_force_min_n": 10.5,
+        "carry_accel_max_ms2": 1.0,
+        "rationale": "A quasi-static formula assuming textbook friction predicted 7.0 N would hold this 0.9 kg box, but replay showed a drop with 14.0 mm of slip. Friction is not observable and varies per part. Raising grip to 10.5 N, just under the 12 N crush limit, gives real margin; replay overrides the formula.",
+        "source_report_ids": ["ex_cardboard_003"]
       }
     }
   ]

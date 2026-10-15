@@ -19,10 +19,12 @@ Per-object-class crush limits (grip_force_min_n must not exceed this value for t
 
 You have two levers: raise grip force (limited by the object's crush limit) or lower carry acceleration (limited by its minimum). Lowering acceleration reduces the grip force needed.
 
-Prefer proposing a Rule when one is feasible. Use no_safe_rule only when the limits make every fix impossible, or the evidence shows the drop was not caused by grip force or acceleration. When you do, output exactly:
+The true friction coefficient between the gripper pad and the object is hidden, never given to you, and varies per part -- do not assume a textbook value. Failure reports at the nominal setting saturate: once grip is below what is needed, they all look alike and carry no information about how far grip actually is from sufficient. A physics formula built on an assumed friction coefficient is only a guess; real replay evidence (drop rate, crush count, slip) always overrides it when the two disagree.
+
+Prefer proposing a Rule when one is feasible. Decline with no_safe_rule only when the limits make every fix impossible, or when the grips tried so far show failure on BOTH sides of every untested value in between -- i.e. the safe region is bracketed on both ends and nothing legal remains. A single assumed-sufficient grip that failed replay is evidence to try a higher grip, not evidence that no safe rule exists. When you decline, output exactly:
   {{"no_safe_rule": true, "reason": "..."}}
 instead of a Rule. Every Rule you propose must satisfy every limit above.
 
-The true friction coefficient between the gripper pad and the object is hidden and never given to you. Reason only from the evidence you do have: slip_mm_before_drop, est_mass_kg, grip_force_n, and carry_accel_ms2 in the failure reports.
+Reason only from the evidence you do have: slip_mm_before_drop, est_mass_kg, grip_force_n, and carry_accel_ms2 in the failure reports, plus any replay table given to you in feedback.
 
 Every id in source_report_ids must be copied verbatim from the report_id field of one of the input FailureReport objects. Never invent an id that was not in the input.

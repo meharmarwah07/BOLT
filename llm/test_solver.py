@@ -288,6 +288,39 @@ def test_examples_exclude_glass_jar():
     return True, ""
 
 
+def test_no_hidden_sim_numbers_in_prompt_files():
+    """docs/REVISION.md: the friction range and the crush-jitter
+    distribution must never be disclosed in prompt/example text. Checks
+    the raw files on disk (not solver_mod.SYSTEM_PROMPT, which legitimately
+    contains the DISCLOSED datasheet/crush limits substituted in by
+    solver._load_system_prompt -- those are intentional and excluded here).
+
+    Targets only the few hidden numbers distinctive enough not to collide
+    with ordinary values already in these files (e.g. CRUSH_LIMIT_JITTER_
+    CLIP_SIGMAS=3.0 and sample_friction's per-class mass_kg are deliberately
+    left out: 3.0 and 0.4 already appear as ordinary grip/mass numbers in
+    pre-existing examples, which would make this test fail for reasons
+    unrelated to an actual leak).
+    """
+    sim_dir = os.path.join(os.path.dirname(HERE), "sim")
+    if sim_dir not in sys.path:
+        sys.path.insert(0, sim_dir)
+    import cell_model  # sim/cell_model.py
+
+    friction_lo, friction_hi = cell_model.OBJECT_CLASSES["glass_jar"]["friction_range"]
+    hidden_strs = {str(v) for v in (friction_lo, friction_hi, cell_model.CRUSH_LIMIT_JITTER, cell_model.PAD_FRICTION)}
+
+    prompts_dir = os.path.join(HERE, "prompts")
+    for name in ("solver_system.txt", "examples.json"):
+        path = os.path.join(prompts_dir, name)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        for s in hidden_strs:
+            if s in text:
+                return False, f"hidden sim number {s!r} found in {path}"
+    return True, ""
+
+
 def test_retry_after_seconds_parsing():
     import solver as solver_mod
 
@@ -485,6 +518,7 @@ UNIT_TESTS = [
     ("system prompt non-empty and mentions no_safe_rule", test_system_prompt_nonempty_and_mentions_no_safe_rule),
     ("system prompt limits match rules/limits.py", test_system_prompt_limits_match_rules_limits),
     ("no example uses object_class=glass_jar (anchoring risk)", test_examples_exclude_glass_jar),
+    ("no hidden sim numbers (friction range, crush jitter) in prompt files", test_no_hidden_sim_numbers_in_prompt_files),
     ("_retry_after_seconds parses/caps/defaults Retry-After", test_retry_after_seconds_parsing),
     ("HTTP 429 Retry-After is honoured and retried", test_429_retry_after_is_honoured),
     ("reasoning_effort is sent only when FLEET_LLM_REASONING_EFFORT is set", test_reasoning_effort_sent_only_when_set),
