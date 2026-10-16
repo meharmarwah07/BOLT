@@ -1,0 +1,23 @@
+{
+  "label": null,
+  "is_stub": false,
+  "rule": {
+    "schema_version": "1",
+    "rule_id": "r_2d8a7a90_4",
+    "object_class": "glass_jar",
+    "rule_type": "fixed",
+    "grip_force_min_n": 20.0,
+    "grip_fraction": null,
+    "carry_accel_max_ms2": 1.0,
+    "proposed_by": "llm-solver",
+    "created_at": "2026-10-16T17:19:24.752459Z",
+    "rationale": "Prior grips at 6, 10, 12.5 N all still drop (1.00, 1.00, 0.88). With 0.4 kg jar, raising grip to 20 N is below the 25 N crush limit and may fix drops; acceleration already at minimum.",
+    "source_report_ids": [
+      "fr_f6b8dce5",
+      "fr_2b77f387",
+      "fr_e78793c3",
+      "fr_109af7f3",
+      "fr_125d576f"
+    ]
+  }
+}
