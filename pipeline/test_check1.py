@@ -13,6 +13,7 @@ Run with:
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -403,7 +404,7 @@ def test_evaluate_heldout_dev_mode_unaffected_by_new_guards():
         # 120s, not 60: matches the existing dev-mode test's own timeout --
         # every evaluate_heldout.py invocation runs an expensive grid
         # search (GRID_RESOLUTION^2 check1() calls) regardless of mode.
-        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=240,
     )
     if result.returncode != 0:
         return False, f"evaluate_heldout.py --dev failed (rc={result.returncode}): {result.stderr.strip()!r}"
@@ -438,7 +439,7 @@ def test_evaluate_heldout_custom_access_log_path_used():
             "--cell-b-start", "9000", "--cell-b-end", "9010",
             "--cell-c-start", "9100", "--cell-c-end", "9110",
         ],
-        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=240,
     )
     real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
 
@@ -490,12 +491,16 @@ def test_multi_rule_evaluates_all_rules_in_one_invocation():
     tmp_access_log = os.path.join(HERE, "runs", "test_multi_rule_access.log")
     if os.path.exists(tmp_access_log):
         os.remove(tmp_access_log)
-    rule_a = _write_demo_accepted_rule(rule_a_json, audit_a, is_stub=True, grip=20.0, accel=1.0, rule_id="r_multi_a")
-    # grip=21.0, not 22.0: measured to clear v1 cleanly (0 crushes); 22.0
-    # crushes 2/100 seeds under CRUSH_LIMIT_JITTER (glass_jar crush_limit=25,
-    # worst-case jittered floor 25*0.85=21.25), which would make this
-    # fixture CHECK1_FAILED instead of CHECK1_PASSED.
-    rule_b = _write_demo_accepted_rule(rule_b_json, audit_b, is_stub=True, grip=21.0, accel=1.0, rule_id="r_multi_b")
+    # is_stub=False (not True): this test runs --held-out, and hardening
+    # item 1 now refuses stub rules there. grip=21.1/21.2 at accel=0.5
+    # (not 20.0/21.0 at 1.0): measured to clear the CURRENT default gate
+    # (v2.1, combined failure <=0.40, zero crush) on check1_mod.
+    # DEFAULT_TRAIN_SEEDS, which hardening item 2's provenance re-check
+    # now also requires -- 20.0/21.0 at accel=1.0 clear only v1 (combined
+    # failure Wilson-upper lands at 0.458/0.427, both > 0.40), and 21.3+
+    # crushes 1/100 seeds under CRUSH_LIMIT_JITTER.
+    rule_a = _write_demo_accepted_rule(rule_a_json, audit_a, is_stub=False, grip=21.1, accel=0.5, rule_id="r_multi_a")
+    rule_b = _write_demo_accepted_rule(rule_b_json, audit_b, is_stub=False, grip=21.2, accel=0.5, rule_id="r_multi_b")
 
     real_access_log = os.path.join(HERE, "runs", "heldout_access.log")
     real_before = open(real_access_log).read() if os.path.exists(real_access_log) else None
@@ -509,7 +514,7 @@ def test_multi_rule_evaluates_all_rules_in_one_invocation():
             "--cell-b-start", "8000", "--cell-b-end", "8010",
             "--cell-c-start", "8100", "--cell-c-end", "8110",
         ],
-        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=240,
     )
     real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
 
@@ -578,7 +583,7 @@ def test_multi_rule_dev_mode_writes_no_access_log():
             "--cell-b-start", "5000", "--cell-b-end", "5005",
             "--cell-c-start", "5100", "--cell-c-end", "5105",
         ],
-        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=240,
     )
     real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
 
@@ -588,6 +593,126 @@ def test_multi_rule_dev_mode_writes_no_access_log():
         return False, "the REAL heldout_access.log changed during a --dev multi-rule run"
     if "REFUSED" in result.stderr:
         return False, f"expected --dev to be unaffected by the guards; got {result.stderr!r}"
+    return True, ""
+
+
+def test_multi_rule_refuses_stub_rule_under_held_out():
+    """Hardening item 1: a stub rule (loop.py's local fake_server demo
+    fallback) must be refused under --held-out, before any seed is
+    touched -- on a throwaway range, never 1000-1199/2000-2199/3000-3199/
+    5000-5199."""
+    rule_json = os.path.join(HERE, "runs", "test_stub_refusal_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_stub_refusal_audit.jsonl")
+    tmp_access_log = os.path.join(HERE, "runs", "test_stub_refusal_access.log")
+    if os.path.exists(tmp_access_log):
+        os.remove(tmp_access_log)
+    _write_demo_accepted_rule(rule_json, audit_path, is_stub=True, rule_id="r_stub_refusal")
+
+    real_access_log = os.path.join(HERE, "runs", "heldout_access.log")
+    real_before = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_json, "--audit-path", audit_path,
+            "--access-log-path", tmp_access_log,
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=30,
+    )
+    real_after = open(real_access_log).read() if os.path.exists(real_access_log) else None
+
+    if result.returncode == 0:
+        return False, f"expected a non-zero exit for a stub rule under --held-out, got 0 (stdout={result.stdout!r})"
+    if "REFUSED" not in result.stderr or "STUB" not in result.stderr:
+        return False, f"expected a REFUSED/'STUB' message on stderr, got {result.stderr!r}"
+    if real_before != real_after:
+        return False, "the REAL heldout_access.log changed even though the stub rule was refused"
+    if os.path.exists(tmp_access_log):
+        return False, "the throwaway access log was written even though the run was refused before any write"
+    return True, ""
+
+
+def test_multi_rule_provenance_recheck_refuses_stale_rule():
+    """Hardening item 2: a rule file that no longer passes Check 1 when
+    re-verified right now (here: hand-tampered to an absurdly low grip
+    after its audit log already recorded CHECK1_PASSED) must be refused
+    under --held-out, independent of what its own audit log claims."""
+    rule_json = os.path.join(HERE, "runs", "test_provenance_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_provenance_audit.jsonl")
+    _write_demo_accepted_rule(rule_json, audit_path, is_stub=False, grip=20.0, accel=1.0, rule_id="r_provenance_test")
+
+    # Tamper with the saved rule AFTER its audit log already recorded
+    # CHECK1_PASSED at grip=20.0 -- simulates a stale/hand-edited file
+    # whose own lifecycle record no longer reflects its actual content.
+    with open(rule_json) as f:
+        accepted_data = json.load(f)
+    accepted_data["rule"]["grip_force_min_n"] = 2.0  # far too low to hold glass_jar
+    with open(rule_json, "w") as f:
+        json.dump(accepted_data, f)
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_json, "--audit-path", audit_path,
+            "--access-log-path", os.path.join(HERE, "runs", "test_provenance_access.log"),
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode == 0:
+        return False, f"expected a non-zero exit for a now-failing rule, got 0 (stdout={result.stdout!r})"
+    if "REFUSED" not in result.stderr or "Check 1" not in result.stderr:
+        return False, f"expected a REFUSED/'Check 1' provenance message on stderr, got {result.stderr!r}"
+    return True, ""
+
+
+def test_multi_rule_refuses_duplicate_rule_file_same_path():
+    """Hardening item 3a: the same --rule-file path given twice must be refused."""
+    rule_json = os.path.join(HERE, "runs", "test_dup_same_path_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_dup_same_path_audit.jsonl")
+    _write_demo_accepted_rule(rule_json, audit_path, is_stub=True, rule_id="r_dup_same_path")
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_json, "--audit-path", audit_path,
+            "--rule-file", rule_json, "--audit-path", audit_path,
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode == 0:
+        return False, f"expected a non-zero exit for a duplicated --rule-file path, got 0 (stdout={result.stdout!r})"
+    if "REFUSED" not in result.stderr or "duplicate" not in result.stderr.lower():
+        return False, f"expected a REFUSED/duplicate message on stderr, got {result.stderr!r}"
+    return True, ""
+
+
+def test_multi_rule_refuses_duplicate_rule_file_identical_content():
+    """Hardening item 3b: two DIFFERENT paths with byte-identical content
+    must also be refused as a duplicate (not just an identical path)."""
+    rule_json_a = os.path.join(HERE, "runs", "test_dup_content_a.json")
+    rule_json_b = os.path.join(HERE, "runs", "test_dup_content_b.json")
+    audit_path = os.path.join(HERE, "runs", "test_dup_content_audit.jsonl")
+    _write_demo_accepted_rule(rule_json_a, audit_path, is_stub=True, rule_id="r_dup_content")
+    shutil.copyfile(rule_json_a, rule_json_b)  # byte-identical content, different path
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_json_a, "--audit-path", audit_path,
+            "--rule-file", rule_json_b, "--audit-path", audit_path,
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode == 0:
+        return False, f"expected a non-zero exit for byte-identical --rule-file content, got 0 (stdout={result.stdout!r})"
+    if "REFUSED" not in result.stderr or "IDENTICAL" not in result.stderr:
+        return False, f"expected a REFUSED/IDENTICAL-content message on stderr, got {result.stderr!r}"
     return True, ""
 
 
@@ -645,7 +770,7 @@ def test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label():
             "--cell-b-start", "5000", "--cell-b-end", "5010",
             "--cell-c-start", "5100", "--cell-c-end", "5110",
         ],
-        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=240,
     )
     if result.returncode != 0:
         return False, f"evaluate_heldout.py failed (rc={result.returncode}): {result.stderr.strip()!r}"
@@ -1348,6 +1473,10 @@ UNIT_TESTS = [
     ("multi-rule evaluator refuses a --rule-file/--audit-path count mismatch", test_multi_rule_rejects_rule_file_audit_path_count_mismatch),
     ("multi-rule evaluator evaluates all rules in one invocation (shared baselines, one log entry)", test_multi_rule_evaluates_all_rules_in_one_invocation),
     ("multi-rule evaluator --dev mode writes no access log", test_multi_rule_dev_mode_writes_no_access_log),
+    ("multi-rule evaluator refuses a stub rule under --held-out", test_multi_rule_refuses_stub_rule_under_held_out),
+    ("multi-rule evaluator provenance re-check refuses a stale/tampered rule", test_multi_rule_provenance_recheck_refuses_stale_rule),
+    ("multi-rule evaluator refuses a duplicated --rule-file (same path)", test_multi_rule_refuses_duplicate_rule_file_same_path),
+    ("multi-rule evaluator refuses a duplicated --rule-file (identical content)", test_multi_rule_refuses_duplicate_rule_file_identical_content),
     ("evaluate_heldout.py shows both Cell C scenarios, ceiling row, stub label", test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label),
     ("loop returns NoSafeRule for an unfixable seed set", test_loop_no_safe_rule_for_unfixable_seeds),
     ("feedback reaches the second request", test_feedback_reaches_second_request),

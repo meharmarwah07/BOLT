@@ -47,9 +47,19 @@ corrected for k rules evaluated; Cell C drop rate not higher; crush not
 increased on either cell). Output: heldout_eval_MULTI_<timestamp>
 {_DEV}.{json,md}. The original single-rule path (--rule-json, default)
 is unchanged when --rule-file is not given.
+
+Multi-rule hardening, under --held-out (checked before any held-out seed
+is touched): a --rule-file marked as a stub (is_stub or a "stub" label)
+is refused outright; each rule is independently re-verified against the
+CURRENT Check 1 gate on TRAIN seeds (never held-out), refused if it no
+longer passes; the same --rule-file path or byte-identical content given
+twice is refused as a duplicate. See _is_stub_accepted_rule,
+_verify_rule_still_passes_check1, and the path/hash de-duplication in
+_main_multi_rule.
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import sys
@@ -420,6 +430,29 @@ def _mcnemar_table(cell_label, rows, accepted_name="accepted_rule"):
     return "\n".join(lines)
 
 
+def _is_stub_accepted_rule(accepted_data) -> bool:
+    """True if an accepted_rule.json-shaped dict marks itself as a stub
+    (loop.py's is_stub flag, or a "label" that says so -- loop.py only
+    ever sets label to STUB_LABEL or None, but this also catches any
+    other truthy label mentioning "stub")."""
+    if accepted_data.get("is_stub"):
+        return True
+    label = accepted_data.get("label")
+    return bool(label) and "stub" in str(label).lower()
+
+
+def _verify_rule_still_passes_check1(rule):
+    """Provenance hardening: re-run the REAL Check 1 (pipeline/check1.py,
+    unchanged) on TRAIN seeds (check1_mod.DEFAULT_TRAIN_SEEDS, i.e. 0-99 --
+    never held-out) against the CURRENT registered gate
+    (check1_mod.CHECK1_VERSION), independent of whatever audit_path's
+    lifecycle log says. Catches a rule file that no longer clears the
+    currently-registered gate (stale, hand-edited, or from a since-
+    tightened check1 version) even if its own audit log still claims
+    CHECK1_PASSED. Returns the real check1_mod.Check1Outcome."""
+    return check1_mod.check1(rule, check1_mod.DEFAULT_TRAIN_SEEDS)
+
+
 def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, audit_paths):
     """Multi-rule path (--rule-file, one or more): evaluates every given
     gate-passing rule in ONE invocation. docs/SUCCESS_CRITERION.md:
@@ -434,8 +467,20 @@ def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, a
     baselines across every rule targeting the same object_class (computed
     once per class, not once per rule).
     """
-    rule_entries = []  # (rule_file, audit_path, rule_label, is_stub, rule)
-    for rule_file, audit_path in zip(args.rule_file, audit_paths):
+    # Pass 1 (cheap, no sim call): existence + duplicate detection across
+    # ALL --rule-file arguments, before anything else -- hardening item 3.
+    # The same path (even spelled differently, e.g. a symlink or a
+    # relative vs absolute form) or byte-identical content given twice
+    # would silently double-count one rule in k (the Bonferroni
+    # denominator) and in the access log. Done as its own pass (not
+    # folded into pass 2 below) so a duplicate is always caught on its
+    # SECOND occurrence regardless of whether the FIRST occurrence would
+    # itself be refused by the (expensive, real-sim) provenance re-check
+    # in pass 2 -- duplicate detection must not depend on rule validity.
+    raw_bytes_by_file = {}
+    seen_real_paths = {}  # realpath -> the --rule-file string that first used it
+    seen_content_hashes = {}  # sha256 of file bytes -> the --rule-file string that first used it
+    for rule_file in args.rule_file:
         if not os.path.exists(rule_file):
             print(
                 f"REFUSED: {rule_file} does not exist. Run pipeline/loop.py first -- it writes "
@@ -443,10 +488,59 @@ def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, a
                 file=sys.stderr,
             )
             sys.exit(1)
-        with open(rule_file) as f:
-            accepted_data = json.load(f)
+        real_path = os.path.realpath(rule_file)
+        if real_path in seen_real_paths:
+            print(
+                f"WARNING: --rule-file {rule_file!r} is the same file as the earlier "
+                f"--rule-file {seen_real_paths[real_path]!r}.\n"
+                "REFUSED: each rule must be evaluated exactly once -- remove the duplicate --rule-file.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        seen_real_paths[real_path] = rule_file
+        with open(rule_file, "rb") as f:
+            raw_bytes = f.read()
+        raw_bytes_by_file[rule_file] = raw_bytes
+        content_hash = hashlib.sha256(raw_bytes).hexdigest()
+        if content_hash in seen_content_hashes:
+            print(
+                f"WARNING: --rule-file {rule_file!r} has IDENTICAL content to the earlier "
+                f"--rule-file {seen_content_hashes[content_hash]!r} (same sha256, different path).\n"
+                "REFUSED: each rule must be evaluated exactly once -- remove the duplicate --rule-file.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        seen_content_hashes[content_hash] = rule_file
+
+    # Pass 2: parse, stub-check (item 1), provenance re-check (item 2,
+    # runs a real sim on TRAIN seeds only -- never held-out).
+    rule_entries = []  # (rule_file, audit_path, rule_label, is_stub, rule)
+    for rule_file, audit_path in zip(args.rule_file, audit_paths):
+        accepted_data = json.loads(raw_bytes_by_file[rule_file])
+
+        if args.held_out and _is_stub_accepted_rule(accepted_data):
+            print(
+                f"REFUSED: {rule_file} is a STUB rule (is_stub={accepted_data.get('is_stub')!r}, "
+                f"label={accepted_data.get('label')!r}) -- stub rules (loop.py's local-stub demo "
+                "fallback) cannot be evaluated under --held-out.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         rule_label = accepted_data.get("label")
         rule = Rule.model_validate(accepted_data["rule"])
+
+        if args.held_out:
+            reverify = _verify_rule_still_passes_check1(rule)
+            if not reverify.passed:
+                print(
+                    f"REFUSED: {rule_file} (rule_id={rule.rule_id}) no longer passes Check 1 when "
+                    f"re-verified now against the current gate (reasons: {'; '.join(reverify.reasons)}). "
+                    "Provenance check failed -- this rule cannot be evaluated under --held-out.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
         rule_entries.append((rule_file, audit_path, rule_label, accepted_data.get("is_stub"), rule))
 
     k = len(rule_entries)
