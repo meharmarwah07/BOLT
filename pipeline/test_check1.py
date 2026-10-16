@@ -669,6 +669,175 @@ def test_multi_rule_provenance_recheck_refuses_stale_rule():
     return True, ""
 
 
+def _demo_rule_for_check1_seeds_tests():
+    return Rule(
+        rule_id="r_check1seeds_mock_test", object_class="glass_jar",
+        grip_force_min_n=20.0, carry_accel_max_ms2=1.0,
+        proposed_by="test", created_at=dt.datetime.now(dt.timezone.utc),
+        rationale="test", source_report_ids=["fr_0001"],
+    )
+
+
+class _FakeCheck1Outcome:
+    """Canned passing outcome -- stands in for a real check1_mod.Check1Outcome
+    so the mocked tests below never run a real simulation."""
+    passed = True
+    reasons = []
+
+
+def test_check1_seeds_default_unchanged():
+    """--check1-seeds not given: argparse must default to None, and
+    _verify_rule_still_passes_check1(rule) (no train_seeds) must still
+    replay exactly check1_mod.DEFAULT_TRAIN_SEEDS (0-99) -- the behaviour
+    this function had before the flag existed. Mocked: check1_mod.check1
+    is monkey-patched to record its train_seeds argument and return a
+    canned passing outcome instead of running a real simulation."""
+    import argparse as _argparse
+    p = _argparse.ArgumentParser()
+    # Mirror just the one flag under test, to check its default in isolation
+    # without invoking the full main() (which would require --held-out/--dev).
+    p.add_argument("--check1-seeds", type=int, default=None)
+    parsed = p.parse_args([])
+    if parsed.check1_seeds is not None:
+        return False, f"expected --check1-seeds to default to None, got {parsed.check1_seeds!r}"
+
+    rule = _demo_rule_for_check1_seeds_tests()
+    captured = {}
+    real_check1 = check1_mod.check1
+
+    def fake_check1(rule_arg, train_seeds, **kwargs):
+        captured["train_seeds"] = list(train_seeds)
+        return _FakeCheck1Outcome()
+
+    check1_mod.check1 = fake_check1
+    try:
+        outcome = evaluate_heldout_mod._verify_rule_still_passes_check1(rule)
+    finally:
+        check1_mod.check1 = real_check1
+
+    expected = list(check1_mod.DEFAULT_TRAIN_SEEDS)
+    if captured.get("train_seeds") != expected:
+        return False, f"expected DEFAULT_TRAIN_SEEDS ({len(expected)} seeds), got {captured.get('train_seeds')}"
+    if not outcome.passed:
+        return False, "expected the mocked outcome to report passed=True"
+    return True, ""
+
+
+def test_check1_seeds_300_threads_through_provenance_recheck_mocked():
+    """--check1-seeds 300: _verify_rule_still_passes_check1(rule,
+    train_seeds=range(300)) must replay exactly seeds 0-299 (300 total),
+    not the default 100. Mocked cheaply: check1_mod.check1 is monkey-
+    patched to record train_seeds and return a canned passing outcome --
+    this test never runs a real 300-seed simulation."""
+    rule = _demo_rule_for_check1_seeds_tests()
+    captured = {}
+    real_check1 = check1_mod.check1
+
+    def fake_check1(rule_arg, train_seeds, **kwargs):
+        captured["train_seeds"] = list(train_seeds)
+        return _FakeCheck1Outcome()
+
+    check1_mod.check1 = fake_check1
+    try:
+        outcome = evaluate_heldout_mod._verify_rule_still_passes_check1(rule, train_seeds=range(300))
+    finally:
+        check1_mod.check1 = real_check1
+
+    if captured.get("train_seeds") != list(range(300)):
+        got = captured.get("train_seeds")
+        got_len = len(got) if got is not None else None
+        return False, f"expected train_seeds=range(300) (300 seeds, 0-299), got len={got_len}"
+    if not outcome.passed:
+        return False, "expected the mocked outcome to report passed=True"
+    return True, ""
+
+
+def test_check1_seeds_refuses_below_100():
+    """--check1-seeds 99 must be REFUSED (below the minimum of 100); 100
+    itself must NOT be refused by this guard (it should fail later, on
+    the separate "neither --held-out nor --dev" check instead) -- a
+    boundary check on the N<100 refusal, run with no other flags so
+    neither case ever reaches a real simulation."""
+    result_low = subprocess.run(
+        [sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--check1-seeds", "99"],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=15,
+    )
+    if result_low.returncode == 0:
+        return False, f"expected a non-zero exit for --check1-seeds 99, got 0 (stdout={result_low.stdout!r})"
+    if "REFUSED" not in result_low.stderr or "check1-seeds" not in result_low.stderr.lower():
+        return False, f"expected a REFUSED/--check1-seeds message on stderr, got {result_low.stderr!r}"
+
+    result_boundary = subprocess.run(
+        [sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--check1-seeds", "100"],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=15,
+    )
+    if result_boundary.returncode == 0:
+        return False, f"expected a non-zero exit for --check1-seeds 100 (no --held-out/--dev), got 0"
+    if "check1-seeds" in result_boundary.stderr.lower():
+        return False, (
+            "expected --check1-seeds 100 to pass the N<100 guard (and fail later, on the "
+            f"--held-out/--dev check instead); got a check1-seeds refusal: {result_boundary.stderr!r}"
+        )
+    if "neither --held-out nor --dev" not in result_boundary.stderr:
+        return False, f"expected the --held-out/--dev refusal instead, got {result_boundary.stderr!r}"
+    return True, ""
+
+
+def test_check1_seeds_recorded_in_multi_rule_report():
+    """Default behaviour (no --check1-seeds) must still record
+    check1_seeds=100 in both the written JSON report and the .md, so the
+    value actually used by the provenance re-check is always visible --
+    not just when the flag is explicitly passed. Real (cheap, 100-seed,
+    already-paid-for-elsewhere) run on a throwaway range, fresh fixture
+    files so this test doesn't share state with any other test."""
+    rule_json = os.path.join(HERE, "runs", "test_check1_seeds_rule.json")
+    audit_path = os.path.join(HERE, "runs", "test_check1_seeds_audit.jsonl")
+    tmp_access_log = os.path.join(HERE, "runs", "test_check1_seeds_access.log")
+    if os.path.exists(tmp_access_log):
+        os.remove(tmp_access_log)
+    # grip=21.1/accel=0.5: same (grip, accel) test_multi_rule_evaluates_all_
+    # rules_in_one_invocation already established clears the CURRENT
+    # default gate (v2.1) on check1_mod.DEFAULT_TRAIN_SEEDS -- reused here
+    # so this is a known-passing fixture, not a guess.
+    rule = _write_demo_accepted_rule(rule_json, audit_path, is_stub=False, grip=21.1, accel=0.5, rule_id="r_check1seeds_report")
+
+    result = subprocess.run(
+        [
+            sys.executable, os.path.join(HERE, "evaluate_heldout.py"), "--held-out",
+            "--rule-file", rule_json, "--audit-path", audit_path,
+            "--access-log-path", tmp_access_log,
+            "--cell-b-start", "8000", "--cell-b-end", "8010",
+            "--cell-c-start", "8100", "--cell-c-end", "8110",
+        ],
+        cwd=HERE, env={**os.environ}, capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        return False, f"expected a clean run; rc={result.returncode} stderr={result.stderr.strip()[:500]!r}"
+
+    json_candidates = [
+        f for f in os.listdir(os.path.join(HERE, "runs"))
+        if f.startswith("heldout_eval_MULTI_") and f.endswith(".json") and not f.endswith("_DEV.json")
+    ]
+    if not json_candidates:
+        return False, "expected a heldout_eval_MULTI_*.json report to be written"
+    report_path = os.path.join(HERE, "runs", sorted(json_candidates)[-1])
+    with open(report_path) as f:
+        report = json.load(f)
+    if report.get("check1_seeds") != 100:
+        return False, f"expected check1_seeds=100 (default) in the report JSON, got {report.get('check1_seeds')!r}"
+
+    md_path = report_path[: -len(".json")] + ".md"
+    if not os.path.exists(md_path):
+        return False, f"expected {md_path} to exist"
+    with open(md_path) as f:
+        md_text = f.read()
+    if "train seeds 0-99" not in md_text or "100 total" not in md_text:
+        return False, "expected the markdown to record 'train seeds 0-99 (100 total)' for the default"
+    if rule.rule_id not in {r["rule_id"] for r in report.get("rules", [])}:
+        return False, f"expected {rule.rule_id} in the report's rules"
+    return True, ""
+
+
 def test_multi_rule_refuses_duplicate_rule_file_same_path():
     """Hardening item 3a: the same --rule-file path given twice must be refused."""
     rule_json = os.path.join(HERE, "runs", "test_dup_same_path_rule.json")
@@ -1475,6 +1644,10 @@ UNIT_TESTS = [
     ("multi-rule evaluator --dev mode writes no access log", test_multi_rule_dev_mode_writes_no_access_log),
     ("multi-rule evaluator refuses a stub rule under --held-out", test_multi_rule_refuses_stub_rule_under_held_out),
     ("multi-rule evaluator provenance re-check refuses a stale/tampered rule", test_multi_rule_provenance_recheck_refuses_stale_rule),
+    ("--check1-seeds default unchanged (DEFAULT_TRAIN_SEEDS, mocked)", test_check1_seeds_default_unchanged),
+    ("--check1-seeds 300 threads through the provenance re-check (mocked)", test_check1_seeds_300_threads_through_provenance_recheck_mocked),
+    ("--check1-seeds refuses N<100, boundary at 100 passes the guard", test_check1_seeds_refuses_below_100),
+    ("--check1-seeds (default) is recorded in the multi-rule report JSON/md", test_check1_seeds_recorded_in_multi_rule_report),
     ("multi-rule evaluator refuses a duplicated --rule-file (same path)", test_multi_rule_refuses_duplicate_rule_file_same_path),
     ("multi-rule evaluator refuses a duplicated --rule-file (identical content)", test_multi_rule_refuses_duplicate_rule_file_identical_content),
     ("evaluate_heldout.py shows both Cell C scenarios, ceiling row, stub label", test_heldout_shows_both_cell_c_scenarios_ceiling_row_and_stub_label),

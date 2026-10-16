@@ -441,16 +441,23 @@ def _is_stub_accepted_rule(accepted_data) -> bool:
     return bool(label) and "stub" in str(label).lower()
 
 
-def _verify_rule_still_passes_check1(rule):
+def _verify_rule_still_passes_check1(rule, train_seeds=None):
     """Provenance hardening: re-run the REAL Check 1 (pipeline/check1.py,
-    unchanged) on TRAIN seeds (check1_mod.DEFAULT_TRAIN_SEEDS, i.e. 0-99 --
-    never held-out) against the CURRENT registered gate
-    (check1_mod.CHECK1_VERSION), independent of whatever audit_path's
-    lifecycle log says. Catches a rule file that no longer clears the
-    currently-registered gate (stale, hand-edited, or from a since-
-    tightened check1 version) even if its own audit log still claims
-    CHECK1_PASSED. Returns the real check1_mod.Check1Outcome."""
-    return check1_mod.check1(rule, check1_mod.DEFAULT_TRAIN_SEEDS)
+    unchanged) on TRAIN seeds (`train_seeds`, default
+    check1_mod.DEFAULT_TRAIN_SEEDS, i.e. 0-99 -- never held-out) against
+    the CURRENT registered gate (check1_mod.CHECK1_VERSION), independent
+    of whatever audit_path's lifecycle log says. Catches a rule file that
+    no longer clears the currently-registered gate (stale, hand-edited, or
+    from a since-tightened check1 version) even if its own audit log still
+    claims CHECK1_PASSED. Returns the real check1_mod.Check1Outcome.
+
+    `train_seeds`: lets a caller use a wider seed count than the default
+    100 (e.g. --check1-seeds, for docs/REVISION2.md's 0-299) -- passing
+    None keeps this function's original behaviour unchanged.
+    """
+    if train_seeds is None:
+        train_seeds = check1_mod.DEFAULT_TRAIN_SEEDS
+    return check1_mod.check1(rule, train_seeds)
 
 
 def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, audit_paths):
@@ -512,6 +519,12 @@ def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, a
             sys.exit(1)
         seen_content_hashes[content_hash] = rule_file
 
+    # --check1-seeds (default: unchanged behaviour, i.e. check1_mod.DEFAULT_TRAIN_SEEDS)
+    # is used ONLY by the provenance re-check below -- nothing else in this
+    # function's logic changes.
+    check1_seeds_n = args.check1_seeds if args.check1_seeds is not None else len(check1_mod.DEFAULT_TRAIN_SEEDS)
+    check1_seeds_range = range(args.check1_seeds) if args.check1_seeds is not None else check1_mod.DEFAULT_TRAIN_SEEDS
+
     # Pass 2: parse, stub-check (item 1), provenance re-check (item 2,
     # runs a real sim on TRAIN seeds only -- never held-out).
     rule_entries = []  # (rule_file, audit_path, rule_label, is_stub, rule)
@@ -531,7 +544,7 @@ def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, a
         rule = Rule.model_validate(accepted_data["rule"])
 
         if args.held_out:
-            reverify = _verify_rule_still_passes_check1(rule)
+            reverify = _verify_rule_still_passes_check1(rule, train_seeds=check1_seeds_range)
             if not reverify.passed:
                 print(
                     f"REFUSED: {rule_file} (rule_id={rule.rule_id}) no longer passes Check 1 when "
@@ -762,6 +775,7 @@ def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, a
         "baseline_params": dict(check1_mod.BASELINE_PARAMS),
         "k_rules_evaluated": k,
         "bonferroni_threshold": bonferroni_threshold,
+        "check1_seeds": check1_seeds_n,
         "rules": rule_reports,
     }
 
@@ -774,6 +788,11 @@ def _main_multi_rule(args, cell_b_start, cell_b_end, cell_c_start, cell_c_end, a
     md_lines = [f"# Held-out evaluation (multi-rule, k={k}){' [DEV RUN]' if args.dev else ''}", ""]
     if dev_banner:
         md_lines += [dev_banner, ""]
+    md_lines += [
+        f"Multi-rule provenance re-check (--check1-seeds): train seeds 0-{check1_seeds_n - 1} "
+        f"({check1_seeds_n} total).",
+        "",
+    ]
     md_lines += [top_notice, ""]
     md_lines += [
         "| rule_id | class | B drop (none) | B drop (rule) | B McNemar p | Bonferroni thr. | "
@@ -821,10 +840,27 @@ def main():
                     help="required to run --held-out a second time against seeds that already "
                          "touch the final held-out range 3000-3199 (docs/FINAL_PROTOCOL.md: "
                          "'used once'); recorded in the access log for audit.")
+    p.add_argument("--check1-seeds", type=int, default=None,
+                    help="number of train seeds (0..N-1) used ONLY by the multi-rule path's "
+                         "(--rule-file) provenance re-check, _verify_rule_still_passes_check1 "
+                         "(docs/REVISION2.md: 300, for the 0-299 re-registered seed count). "
+                         "Default: unchanged behaviour, i.e. check1_mod.DEFAULT_TRAIN_SEEDS "
+                         "(0-99). Refused if < 100. Recorded in the report JSON/markdown as "
+                         "'check1_seeds'. Does not affect the single-rule path or anything else "
+                         "in this script.")
     args = p.parse_args()
 
     if args.held_out and args.dev:
         print("REFUSED: --held-out and --dev are mutually exclusive -- choose one.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.check1_seeds is not None and args.check1_seeds < 100:
+        print(
+            f"REFUSED: --check1-seeds {args.check1_seeds} is below the minimum of 100 -- Check 1's "
+            "own admission filter (pipeline/check1.py's Wilson-bound gates) is only a meaningful "
+            "measurement at 100+ seeds; see pipeline/check1.py's DEFAULT_TRAIN_SEEDS docstring.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if not args.held_out and not args.dev:
