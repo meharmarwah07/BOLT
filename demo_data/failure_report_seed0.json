@@ -1,0 +1,15 @@
+{
+  "report_id": "fr_b57d94a7",
+  "cell_id": "A",
+  "owner_id": "owner1",
+  "object_class": "glass_jar",
+  "controller": {
+    "grip_force_n": 5.0,
+    "carry_accel_ms2": 1.0
+  },
+  "outcome": "drop",
+  "drop_phase": "lift",
+  "slip_mm_before_drop": 150.04,
+  "est_mass_kg": 0.4,
+  "seed": 0
+}

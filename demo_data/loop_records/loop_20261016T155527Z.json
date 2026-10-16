@@ -1,0 +1,1696 @@
+{
+  "timestamp": "20261016T155527Z",
+  "is_stub": false,
+  "model": "Gemma-4-31B-IT",
+  "base_url": "https://developer.amd.com.cn/radeon/api/v1",
+  "object_class": "glass_jar",
+  "n_failure_reports": 5,
+  "check1_seeds": 100,
+  "total_llm_requests": 14,
+  "wall_time_s": 267.818,
+  "attempts": [
+    {
+      "round": 1,
+      "candidate_index": 1,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_2e66815a_1",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 12.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 1.0,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:55:40.761041Z",
+        "rationale": "Consistent drops during lift phase with 5.0 N grip for a 0.4 kg glass jar indicate insufficient friction. Increasing minimum grip force to 12.0 N provides a significant margin to prevent slip while remaining well below the 25.0 N crush limit for glass jars.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 1,
+        "attempt_errors": [
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 185,
+            "prompt_tokens": 2130,
+            "total_tokens": 2315,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 1525,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 3.51925e-05,
+            "cost_details": {
+              "upstream_inference_cost": 3.51925e-05,
+              "upstream_inference_prompt_cost": 2.22425e-05,
+              "upstream_inference_completions_cost": 1.295e-05,
+              "total_cost": 3.51925e-05,
+              "input_cost": 2.1175e-05,
+              "output_cost": 1.295e-05,
+              "cached_input_cost": 1.0675e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +140.0% of nominal (5.0N -> 12.0N), accel +0.0% of nominal (1.0m/s^2 -> 1.0m/s^2)",
+          "combined (drop-or-crush) failure rate 0.970 (97/100), Wilson 95% CI upper bound 0.990 exceeds the admission filter's <= 0.4"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 97,
+          "other_classes_unchanged": true,
+          "crush_count": 0,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 1.4,
+          "intervention_cost_accel": 0.0
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.97,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.915479219195973,
+          0.9897456617765852
+        ],
+        "seeds_fixed": [
+          35,
+          40,
+          56
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.010254338223414811,
+          0.08452078080402699
+        ],
+        "crush_count_after": 0,
+        "margin": 0.52,
+        "slowdown_proxy": 1.0,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 1,
+      "candidate_index": 2,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_66d552ee_2",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 15.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 1.0,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:55:42.390706Z",
+        "rationale": "Repeated drops for a 0.4 kg glass jar at 5.0 N grip indicate the force is insufficient for the friction coefficient of this object. Increasing grip to 15.0 N provides a significant margin while remaining well below the 25.0 N crush limit for glass jars.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 1,
+        "attempt_errors": [
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 187,
+            "prompt_tokens": 2130,
+            "total_tokens": 2317,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2129,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.46153e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.46153e-05,
+              "upstream_inference_prompt_cost": 1.5253e-06,
+              "upstream_inference_completions_cost": 1.309e-05,
+              "total_cost": 1.46153e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.309e-05,
+              "cached_input_cost": 1.4903e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +200.0% of nominal (5.0N -> 15.0N), accel +0.0% of nominal (1.0m/s^2 -> 1.0m/s^2)",
+          "combined (drop-or-crush) failure rate 0.640 (64/100), Wilson 95% CI upper bound 0.727 exceeds the admission filter's <= 0.4"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 64,
+          "other_classes_unchanged": true,
+          "crush_count": 0,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 2.0,
+          "intervention_cost_accel": 0.0
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.64,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.542352199811621,
+          0.7272892540950986
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          7,
+          10,
+          13,
+          14,
+          17,
+          21,
+          31,
+          33,
+          35,
+          36,
+          38,
+          40,
+          42,
+          45,
+          56,
+          61,
+          62,
+          68,
+          69,
+          71,
+          74,
+          75,
+          76,
+          79,
+          81,
+          83,
+          84,
+          86,
+          88,
+          89,
+          90,
+          91,
+          94
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.2727107459049014,
+          0.4576478001883791
+        ],
+        "crush_count_after": 0,
+        "margin": 0.4,
+        "slowdown_proxy": 1.0,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 1,
+      "candidate_index": 3,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_66d552ee_3",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 15.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 1.0,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:55:53.594872Z",
+        "rationale": "Multiple reports show consistent drops during lift at 5.0 N for a 0.4 kg glass jar. Increasing the grip force to 15.0 N provides significant margin to prevent slipping while remaining well below the 25.0 N crush limit for glass jars.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 1,
+        "attempt_errors": [
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 182,
+            "prompt_tokens": 2130,
+            "total_tokens": 2312,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2129,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.42653e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.42653e-05,
+              "upstream_inference_prompt_cost": 1.5253e-06,
+              "upstream_inference_completions_cost": 1.274e-05,
+              "total_cost": 1.42653e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.274e-05,
+              "cached_input_cost": 1.4903e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +200.0% of nominal (5.0N -> 15.0N), accel +0.0% of nominal (1.0m/s^2 -> 1.0m/s^2)",
+          "combined (drop-or-crush) failure rate 0.640 (64/100), Wilson 95% CI upper bound 0.727 exceeds the admission filter's <= 0.4"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 64,
+          "other_classes_unchanged": true,
+          "crush_count": 0,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 2.0,
+          "intervention_cost_accel": 0.0
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.64,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.542352199811621,
+          0.7272892540950986
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          7,
+          10,
+          13,
+          14,
+          17,
+          21,
+          31,
+          33,
+          35,
+          36,
+          38,
+          40,
+          42,
+          45,
+          56,
+          61,
+          62,
+          68,
+          69,
+          71,
+          74,
+          75,
+          76,
+          79,
+          81,
+          83,
+          84,
+          86,
+          88,
+          89,
+          90,
+          91,
+          94
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.2727107459049014,
+          0.4576478001883791
+        ],
+        "crush_count_after": 0,
+        "margin": 0.4,
+        "slowdown_proxy": 1.0,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 2,
+      "candidate_index": 1,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_584f4282_4",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 22.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 1.0,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:56:39.006400Z",
+        "rationale": "Replay shows drop rate decreases as grip increases (12N: 0.97, 15N: 0.64). To reach the <0.4 threshold, higher grip is needed. 22N is proposed to maximize stability while staying below the 25N crush limit for glass jars.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 2,
+        "attempt_errors": [
+          "rationale: value too long (max 300 chars); got 322 chars",
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 242,
+            "prompt_tokens": 2878,
+            "total_tokens": 3120,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2121,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 4.49197e-05,
+            "cost_details": {
+              "upstream_inference_cost": 4.49197e-05,
+              "upstream_inference_prompt_cost": 2.79797e-05,
+              "upstream_inference_completions_cost": 1.694e-05,
+              "total_cost": 4.49197e-05,
+              "input_cost": 2.6495e-05,
+              "output_cost": 1.694e-05,
+              "cached_input_cost": 1.4847e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          },
+          {
+            "completion_tokens": 227,
+            "prompt_tokens": 3162,
+            "total_tokens": 3389,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2874,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 2.79818e-05,
+            "cost_details": {
+              "upstream_inference_cost": 2.7981799999999997e-05,
+              "upstream_inference_prompt_cost": 1.20918e-05,
+              "upstream_inference_completions_cost": 1.589e-05,
+              "total_cost": 2.79818e-05,
+              "input_cost": 1.008e-05,
+              "output_cost": 1.589e-05,
+              "cached_input_cost": 2.0118e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +340.0% of nominal (5.0N -> 22.0N), accel +0.0% of nominal (1.0m/s^2 -> 1.0m/s^2)",
+          "2 crush(es) after the rule (must be <= 0)"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 28,
+          "other_classes_unchanged": true,
+          "crush_count": 2,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 3.4,
+          "intervention_cost_accel": 0.0
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.28,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.20139559167598364,
+          0.37488212361345724
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          13,
+          14,
+          15,
+          17,
+          18,
+          19,
+          21,
+          24,
+          28,
+          29,
+          31,
+          32,
+          33,
+          36,
+          38,
+          40,
+          42,
+          44,
+          45,
+          47,
+          48,
+          49,
+          50,
+          52,
+          56,
+          57,
+          58,
+          61,
+          62,
+          63,
+          65,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.6041496156718804,
+          0.7810524613377188
+        ],
+        "crush_count_after": 2,
+        "margin": 0.12,
+        "slowdown_proxy": 1.0,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 2,
+      "candidate_index": 2,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_584f4282_5",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 22.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 1.0,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:57:01.742208Z",
+        "rationale": "Replay shows grip force 12N (97% drop) and 15N (64% drop) are insufficient. Increasing grip to 22N, staying under the 25N crush limit, should further reduce the drop rate to meet the target, given the observed trend.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 2,
+        "attempt_errors": [
+          "rationale: value too long (max 300 chars); got 328 chars",
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 253,
+            "prompt_tokens": 2878,
+            "total_tokens": 3131,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2877,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.97589e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.97589e-05,
+              "upstream_inference_prompt_cost": 2.0489e-06,
+              "upstream_inference_completions_cost": 1.771e-05,
+              "total_cost": 1.97589e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.771e-05,
+              "cached_input_cost": 2.0139e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          },
+          {
+            "completion_tokens": 224,
+            "prompt_tokens": 3173,
+            "total_tokens": 3397,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2892,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 2.75394e-05,
+            "cost_details": {
+              "upstream_inference_cost": 2.75394e-05,
+              "upstream_inference_prompt_cost": 1.18594e-05,
+              "upstream_inference_completions_cost": 1.568e-05,
+              "total_cost": 2.75394e-05,
+              "input_cost": 9.835e-06,
+              "output_cost": 1.568e-05,
+              "cached_input_cost": 2.0244e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +340.0% of nominal (5.0N -> 22.0N), accel +0.0% of nominal (1.0m/s^2 -> 1.0m/s^2)",
+          "2 crush(es) after the rule (must be <= 0)"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 28,
+          "other_classes_unchanged": true,
+          "crush_count": 2,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 3.4,
+          "intervention_cost_accel": 0.0
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.28,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.20139559167598364,
+          0.37488212361345724
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          13,
+          14,
+          15,
+          17,
+          18,
+          19,
+          21,
+          24,
+          28,
+          29,
+          31,
+          32,
+          33,
+          36,
+          38,
+          40,
+          42,
+          44,
+          45,
+          47,
+          48,
+          49,
+          50,
+          52,
+          56,
+          57,
+          58,
+          61,
+          62,
+          63,
+          65,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.6041496156718804,
+          0.7810524613377188
+        ],
+        "crush_count_after": 2,
+        "margin": 0.12,
+        "slowdown_proxy": 1.0,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 2,
+      "candidate_index": 3,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_584f4282_6",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 22.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 1.0,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:57:17.960930Z",
+        "rationale": "Baseline 5N grip failed. Replay shows drop rates decrease as grip force increases (12N -> 0.97, 15N -> 0.64), with no crushing occurring at 15N. Increasing grip force further to 22N (below the 25N crush limit) is required to bring the failure rate below the 0.4 threshold.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 1,
+        "attempt_errors": [
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 244,
+            "prompt_tokens": 2878,
+            "total_tokens": 3122,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2877,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.91289e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.91289e-05,
+              "upstream_inference_prompt_cost": 2.0489e-06,
+              "upstream_inference_completions_cost": 1.708e-05,
+              "total_cost": 1.91289e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.708e-05,
+              "cached_input_cost": 2.0139e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +340.0% of nominal (5.0N -> 22.0N), accel +0.0% of nominal (1.0m/s^2 -> 1.0m/s^2)",
+          "2 crush(es) after the rule (must be <= 0)"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 28,
+          "other_classes_unchanged": true,
+          "crush_count": 2,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 3.4,
+          "intervention_cost_accel": 0.0
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.28,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.20139559167598364,
+          0.37488212361345724
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          13,
+          14,
+          15,
+          17,
+          18,
+          19,
+          21,
+          24,
+          28,
+          29,
+          31,
+          32,
+          33,
+          36,
+          38,
+          40,
+          42,
+          44,
+          45,
+          47,
+          48,
+          49,
+          50,
+          52,
+          56,
+          57,
+          58,
+          61,
+          62,
+          63,
+          65,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.6041496156718804,
+          0.7810524613377188
+        ],
+        "crush_count_after": 2,
+        "margin": 0.12,
+        "slowdown_proxy": 1.0,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 3,
+      "candidate_index": 1,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_9fca1242_7",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 20.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 0.5,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:58:52.105017Z",
+        "rationale": "Replay shows 22N crushes and 15N drops at 1.0m/s^2. Reducing acceleration to 0.5m/s^2 lowers the required grip force. 20N is chosen to improve hold over 15N while avoiding the crush threshold seen at 22N.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 3,
+        "attempt_errors": [
+          "rationale: value too long (max 300 chars); got 315 chars",
+          "request failed: Request timed out.",
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 227,
+            "prompt_tokens": 2843,
+            "total_tokens": 3070,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2160,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 4.1307e-05,
+            "cost_details": {
+              "upstream_inference_cost": 4.1306999999999996e-05,
+              "upstream_inference_prompt_cost": 2.5416999999999997e-05,
+              "upstream_inference_completions_cost": 1.589e-05,
+              "total_cost": 4.1307e-05,
+              "input_cost": 2.3905e-05,
+              "output_cost": 1.589e-05,
+              "cached_input_cost": 1.512e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          },
+          null,
+          {
+            "completion_tokens": 199,
+            "prompt_tokens": 3112,
+            "total_tokens": 3311,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 3111,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.61427e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.61427e-05,
+              "upstream_inference_prompt_cost": 2.2127e-06,
+              "upstream_inference_completions_cost": 1.393e-05,
+              "total_cost": 1.61427e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.393e-05,
+              "cached_input_cost": 2.1777e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +300.0% of nominal (5.0N -> 20.0N), accel +50.0% of nominal (1.0m/s^2 -> 0.5m/s^2)",
+          "combined (drop-or-crush) failure rate 0.340 (34/100), Wilson 95% CI upper bound 0.437 exceeds the admission filter's <= 0.4"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 34,
+          "other_classes_unchanged": true,
+          "crush_count": 0,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 3.0,
+          "intervention_cost_accel": 0.5
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.34,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.25461379497543,
+          0.43722454341689065
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          13,
+          14,
+          15,
+          17,
+          18,
+          19,
+          21,
+          24,
+          28,
+          29,
+          31,
+          32,
+          33,
+          35,
+          36,
+          38,
+          40,
+          42,
+          44,
+          45,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          56,
+          57,
+          61,
+          62,
+          65,
+          67,
+          68,
+          69,
+          70,
+          71,
+          74,
+          75,
+          76,
+          78,
+          79,
+          81,
+          83,
+          84,
+          85,
+          86,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          96,
+          97,
+          99
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.5627754565831095,
+          0.74538620502457
+        ],
+        "crush_count_after": 0,
+        "margin": 0.19999999999999996,
+        "slowdown_proxy": 1.414213562373095,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 3,
+      "candidate_index": 2,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_31b1c411_8",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 18.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 0.8,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:59:09.829529Z",
+        "rationale": "5N is insufficient. Replay shows 15N is safe from crushing but drops 64%, while 22N crushes some jars. 18N provides a middle ground for stability, and lowering accel to 0.8 m/s^2 reduces required force to prevent slips while staying below the 25N crush limit.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 2,
+        "attempt_errors": [
+          "rationale: value too long (max 300 chars); got 305 chars",
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 205,
+            "prompt_tokens": 2843,
+            "total_tokens": 3048,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2842,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.63744e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.63744e-05,
+              "upstream_inference_prompt_cost": 2.0244e-06,
+              "upstream_inference_completions_cost": 1.435e-05,
+              "total_cost": 1.63744e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.435e-05,
+              "cached_input_cost": 1.9894e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          },
+          {
+            "completion_tokens": 197,
+            "prompt_tokens": 3090,
+            "total_tokens": 3287,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2839,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 2.45623e-05,
+            "cost_details": {
+              "upstream_inference_cost": 2.45623e-05,
+              "upstream_inference_prompt_cost": 1.07723e-05,
+              "upstream_inference_completions_cost": 1.379e-05,
+              "total_cost": 2.45623e-05,
+              "input_cost": 8.785e-06,
+              "output_cost": 1.379e-05,
+              "cached_input_cost": 1.9873e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +260.0% of nominal (5.0N -> 18.0N), accel +20.0% of nominal (1.0m/s^2 -> 0.8m/s^2)",
+          "combined (drop-or-crush) failure rate 0.470 (47/100), Wilson 95% CI upper bound 0.567 exceeds the admission filter's <= 0.4"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 47,
+          "other_classes_unchanged": true,
+          "crush_count": 0,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 2.6,
+          "intervention_cost_accel": 0.19999999999999996
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.47,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.3751065198210374,
+          0.5671131686275227
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          5,
+          7,
+          9,
+          10,
+          11,
+          13,
+          14,
+          17,
+          21,
+          24,
+          28,
+          29,
+          32,
+          33,
+          35,
+          36,
+          38,
+          40,
+          42,
+          45,
+          47,
+          48,
+          50,
+          52,
+          56,
+          57,
+          61,
+          62,
+          67,
+          68,
+          69,
+          71,
+          74,
+          76,
+          78,
+          79,
+          81,
+          83,
+          84,
+          85,
+          86,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          96,
+          97
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.4328868313724773,
+          0.6248934801789626
+        ],
+        "crush_count_after": 0,
+        "margin": 0.28,
+        "slowdown_proxy": 1.1180339887498947,
+        "n_trials": 100
+      }
+    },
+    {
+      "round": 3,
+      "candidate_index": 3,
+      "rule": {
+        "schema_version": "1",
+        "rule_id": "r_9fca1242_9",
+        "object_class": "glass_jar",
+        "rule_type": "fixed",
+        "grip_force_min_n": 20.0,
+        "grip_fraction": null,
+        "carry_accel_max_ms2": 0.5,
+        "proposed_by": "llm-solver",
+        "created_at": "2026-10-16T15:59:19.550640Z",
+        "rationale": "Replay shows 15.0 N is safe from crushing but drops 64% of seeds, while 22.0 N crushes some jars. To increase success without crushing, I'm setting the grip to 20.0 N (below the crush threshold seen at 22.0 N) and lowering acceleration to the minimum 0.5 m/s^2 to compensate for the lower grip force.",
+        "source_report_ids": [
+          "fr_a138f599",
+          "fr_20edf77e",
+          "fr_0ee1d453",
+          "fr_4bd851fa",
+          "fr_65b83106"
+        ]
+      },
+      "no_safe_rule_reason": null,
+      "error": null,
+      "lifecycle_logged": true,
+      "note": null,
+      "cost": {
+        "attempts": 1,
+        "attempt_errors": [
+          null
+        ],
+        "usage_per_attempt": [
+          {
+            "completion_tokens": 219,
+            "prompt_tokens": 2843,
+            "total_tokens": 3062,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": null,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": null,
+              "text_tokens": null,
+              "image_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cache_write_tokens": 0,
+              "cached_tokens": 2842,
+              "image_tokens": 0,
+              "text_tokens": null,
+              "video_tokens": 0
+            },
+            "reasoning_tokens": 0,
+            "cost": 1.73544e-05,
+            "cost_details": {
+              "upstream_inference_cost": 1.73544e-05,
+              "upstream_inference_prompt_cost": 2.0244e-06,
+              "upstream_inference_completions_cost": 1.533e-05,
+              "total_cost": 1.73544e-05,
+              "input_cost": 3.5e-08,
+              "output_cost": 1.533e-05,
+              "cached_input_cost": 1.9894e-06,
+              "cache_write_input_cost": 0,
+              "request_cost": 0,
+              "web_search_cost": 0,
+              "image_input_cost": null,
+              "image_output_cost": null,
+              "audio_input_cost": null
+            }
+          }
+        ]
+      },
+      "check1": {
+        "passed": false,
+        "reasons": [
+          "intervention cost: grip +300.0% of nominal (5.0N -> 20.0N), accel +50.0% of nominal (1.0m/s^2 -> 0.5m/s^2)",
+          "combined (drop-or-crush) failure rate 0.340 (34/100), Wilson 95% CI upper bound 0.437 exceeds the admission filter's <= 0.4"
+        ],
+        "record": {
+          "target_class": "glass_jar",
+          "drops_before": 100,
+          "drops_after": 34,
+          "other_classes_unchanged": true,
+          "crush_count": 0,
+          "cited_report_ids": [
+            "fr_a138f599",
+            "fr_20edf77e",
+            "fr_0ee1d453",
+            "fr_4bd851fa",
+            "fr_65b83106"
+          ],
+          "intervention_cost_grip": 3.0,
+          "intervention_cost_accel": 0.5
+        },
+        "drop_rate_before": 1.0,
+        "drop_rate_after": 0.34,
+        "drop_rate_before_ci95": [
+          0.963005192523998,
+          1.0
+        ],
+        "drop_rate_after_ci95": [
+          0.25461379497543,
+          0.43722454341689065
+        ],
+        "seeds_fixed": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          13,
+          14,
+          15,
+          17,
+          18,
+          19,
+          21,
+          24,
+          28,
+          29,
+          31,
+          32,
+          33,
+          35,
+          36,
+          38,
+          40,
+          42,
+          44,
+          45,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          56,
+          57,
+          61,
+          62,
+          65,
+          67,
+          68,
+          69,
+          70,
+          71,
+          74,
+          75,
+          76,
+          78,
+          79,
+          81,
+          83,
+          84,
+          85,
+          86,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          96,
+          97,
+          99
+        ],
+        "seeds_newly_broken": [],
+        "fixed_rate_ci95": [
+          0.5627754565831095,
+          0.74538620502457
+        ],
+        "crush_count_after": 0,
+        "margin": 0.19999999999999996,
+        "slowdown_proxy": 1.414213562373095,
+        "n_trials": 100
+      }
+    }
+  ],
+  "chosen_rule": null,
+  "no_safe_rule_reason": "search exhausted"
+}

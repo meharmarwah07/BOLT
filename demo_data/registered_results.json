@@ -1,0 +1,41 @@
+{
+  "_comment": "TEMPLATE -- no real values. Per docs/FINAL_PROTOCOL.md / docs/SUCCESS_CRITERION.md, the final held-out evaluation (seeds 3000-3199) has not run yet: as of pipeline/runs/revised_A/summary.txt (commit 8864bd4), arm A's first runs all produced 'no rule', and no arm_B directory exists yet, so there is nothing to evaluate. Every field below is null until that evaluation actually runs; do not fill this in by hand -- regenerate it from the real evaluator output (pipeline/evaluate_heldout.py).",
+  "_field_meanings": {
+    "evaluation_ts": "UTC timestamp the final evaluation was run, ISO 8601. Null until seeds 3000-3199 are used (once, per FINAL_PROTOCOL.md).",
+    "k_rules_evaluated": "Bonferroni k: total count of gate-passing rules across every revised run, both arms (docs/SUCCESS_CRITERION.md item B). The denominator for the corrected McNemar significance threshold (0.05/k).",
+    "arms": "Per-arm summary, keyed 'A' (DeepSeek-V4-Flash) and 'B' (Gemma, per docs/REVISION.md). Each arm: runs_executed, runs_with_gate_passing_rule, rules (list of per-rule result objects), no_rule_runs (count reported as 'no safe rule', per item F).",
+    "rules[].rule_id": "The Rule.rule_id of a gate-passing rule from some run.",
+    "rules[].cell_b_drop_rate_with_rule": "Cell B (seeds 3000-3099) drop rate with the rule active.",
+    "rules[].cell_b_drop_rate_without_rule": "Cell B drop rate at the nominal baseline, same seeds, for the paired comparison.",
+    "rules[].mcnemar_p": "Paired exact McNemar p-value, cell B, rule vs baseline (docs/SUCCESS_CRITERION.md item D.i).",
+    "rules[].meets_success_criterion": "True iff mcnemar_p < 0.05/k_rules_evaluated AND cell C drop rate does not increase AND crush count does not increase on either cell (item D).",
+    "rules[].cell_c_drop_rate_with_rule": "Cell C (seeds 3100-3199) drop rate with the rule active -- must not be higher than without it (item D.ii).",
+    "rules[].crush_count_cell_b": "Crush count on cell B with the rule active -- must not increase vs baseline (item D.iii).",
+    "rules[].crush_count_cell_c": "Crush count on cell C with the rule active -- must not increase vs baseline (item D.iii).",
+    "rules[].wilson_ci95_drop_rate_with_rule": "[lower, upper] Wilson 95% CI of the with-rule drop rate.",
+    "baselines": "Per FINAL_PROTOCOL.md: 'no rule', 'naive 0.9x crush limit', 'near-limit heuristic', and 'v2.1-aware grid rule' (reported as 'none passes' if none does) -- each rule above is compared against every baseline, not just the nominal setting.",
+    "feasibility_table": "List of {baseline_name, drop_rate, crush_count, wilson_ci95} for each of the four baselines above, measured on the same held-out seeds, for context alongside the rule comparisons.",
+    "headline": "Per docs/SUCCESS_CRITERION.md item E: runs executed, runs yielding a gate-passing rule, of those how many meet the success criterion, and the Wilson intervals -- deliberately no single 'best rule' headline."
+  },
+  "evaluation_ts": null,
+  "k_rules_evaluated": null,
+  "arms": {
+    "A": {
+      "model": "DeepSeek-V4-Flash",
+      "runs_executed": null,
+      "runs_with_gate_passing_rule": null,
+      "no_rule_runs": null,
+      "rules": null
+    },
+    "B": {
+      "model": "Gemma-4-31B-IT",
+      "runs_executed": null,
+      "runs_with_gate_passing_rule": null,
+      "no_rule_runs": null,
+      "rules": null
+    }
+  },
+  "baselines": ["no rule", "naive 0.9x crush limit", "near-limit heuristic", "v2.1-aware grid rule"],
+  "feasibility_table": null,
+  "headline": null
+}

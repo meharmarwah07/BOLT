@@ -1,0 +1,23 @@
+{
+  "label": null,
+  "is_stub": false,
+  "rule": {
+    "schema_version": "1",
+    "rule_id": "r_abcfcb78_1",
+    "object_class": "glass_jar",
+    "rule_type": "fixed",
+    "grip_force_min_n": 20.0,
+    "grip_fraction": null,
+    "carry_accel_max_ms2": 1.0,
+    "proposed_by": "llm-solver",
+    "created_at": "2026-10-16T17:15:49.374789Z",
+    "rationale": "Five 0.4 kg glass jars all dropped at 5.0 N grip and 1.0 m/s^2, showing the nominal grip is insufficient and slip is large. Set grip to 20 N, below the 25 N crush limit, and keep acceleration at 1.0 m/s^2 to reduce needed force; this is well above the 5 N that failed repeatedly.",
+    "source_report_ids": [
+      "fr_b649178b",
+      "fr_742329ff",
+      "fr_b50527f9",
+      "fr_c94b2b18",
+      "fr_248fb650"
+    ]
+  }
+}

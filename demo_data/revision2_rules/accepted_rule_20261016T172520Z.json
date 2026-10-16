@@ -1,0 +1,23 @@
+{
+  "label": null,
+  "is_stub": false,
+  "rule": {
+    "schema_version": "1",
+    "rule_id": "r_9559550c_7",
+    "object_class": "glass_jar",
+    "rule_type": "fixed",
+    "grip_force_min_n": 20.0,
+    "grip_fraction": null,
+    "carry_accel_max_ms2": 0.5,
+    "proposed_by": "llm-solver",
+    "created_at": "2026-10-16T17:28:17.638105Z",
+    "rationale": "15N was safe from crushing but had high drops (0.61). 22N reduced drops (0.23) but caused crushing (6 counts), meaning the crush limit is slightly below 22N. Proposing 20N to reduce drops while avoiding crushing, and lowering acceleration to 0.5 m/s^2 to compensate for the lower grip force.",
+    "source_report_ids": [
+      "fr_dd6735da",
+      "fr_8ee03e8d",
+      "fr_351a70c9",
+      "fr_52974c29",
+      "fr_fb38264d"
+    ]
+  }
+}
