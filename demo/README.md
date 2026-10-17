@@ -57,10 +57,10 @@ No API key is read, set, or required anywhere in this app. It does not call an L
 
 ## License
 
-MIT, same as the rest of this repository — see [LICENSE](LICENSE).
+MIT, same as the rest of this repository — see [LICENSE](../LICENSE).
 
 ---
 
 BOLT by Pink Panthers -- simulation only
 
-[GitHub repository](https://github.com/meharmarwah07/BOLT) · [docs/REVISION2_RESULT.md](docs/REVISION2_RESULT.md)
+[GitHub repository](https://github.com/meharmarwah07/BOLT) · [docs/REVISION2_RESULT.md](../docs/REVISION2_RESULT.md)
