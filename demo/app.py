@@ -916,6 +916,6 @@ with tab_amd:
 st.divider()
 st.caption("BOLT by Pink Panthers -- simulation only")
 st.caption(
-    "[GitHub repository](https://github.com/meharmarwah07/PeakRobo) · "
-    "[docs/REVISION2_RESULT.md](https://github.com/meharmarwah07/PeakRobo/blob/main/docs/REVISION2_RESULT.md)"
+    "[GitHub repository](https://github.com/meharmarwah07/BOLT) · "
+    "[docs/REVISION2_RESULT.md](https://github.com/meharmarwah07/BOLT/blob/main/docs/REVISION2_RESULT.md)"
 )
