@@ -26,7 +26,7 @@ Cell A drops a glass jar with hidden low friction. A Monitor writes a FailureRep
 All revision-2 proposals came from models served via AMD Token Factory (OpenAI-compatible endpoint). Request counts and wall times are on the demo's "Where AMD is used" tab, computed from the recorded loop files.
 
 ## Provenance
-Some components (simulator, rule schema, solver, checker) were committed before the Oct 12 build window opened. The pipeline, pre-registered evaluation, revisions, audit log and demo were built during the window. See git history.
+Committed before the Oct 12 build window (Oct 10-11): initial simulator files, the rule checker, the solver with bounded retries and prompts, a Wilson-interval helper, and the rule schema, lifecycle, permission gate and audit log. Built during the window (Oct 12-18): simulator completion and fixes, Token Factory integration, Check 1 and its v2 gate, the feedback loop, the held-out evaluator, the pre-registered runs and both revisions, and the demo. See git history for exact dates.
 
 ## Run the demo
 pip install -r requirements.txt
