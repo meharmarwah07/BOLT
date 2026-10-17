@@ -1,3 +1,5 @@
+> Historical Day-1 design note. Parts are out of date (e.g. section 10); see README.md and docs/ for the current state.
+
 # FLEET — Project Context
 
 Version v0.1 · 2026-10-08 · Owner: Mehar · Status: Day 1 (environment + simulation basics)
